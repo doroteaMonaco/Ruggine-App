@@ -1,6 +1,7 @@
 mod chat_manager;
 mod connection;
 mod database;
+mod config;
 
 // Importiamo i moduli comuni
 #[path = "../common/mod.rs"]
@@ -18,6 +19,7 @@ use tokio::sync::RwLock;
 use connection::ClientConnection;
 use chat_manager::ChatManager;
 use database::DatabaseManager;
+use config::ServerConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "ruggine-server")]
@@ -43,9 +45,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Listening on {}:{}", args.host, args.port);
     info!("Maximum clients: {}", args.max_clients);
     
-    // Inizializza il database
-    let database_url = "sqlite:ruggine.db";
-    let db_manager = Arc::new(DatabaseManager::new(database_url).await?);
+    // Carica la configurazione dal file .env
+    let config = ServerConfig::from_env()?;
+    info!("Configuration loaded from .env file");
+    info!("Database URL: {}", config.database_url);
+    info!("Cleanup days: {}", config.cleanup_days);
+    info!("Performance metrics retention: {} days", config.performance_metrics_retention_days);
+    info!("Backup enabled: {}", config.backup_enabled);
+    
+    // Inizializza il database usando la configurazione
+    let db_manager = Arc::new(DatabaseManager::new(&config.database_url).await?);
     info!("Database initialized successfully");
     
     // Inizializza il chat manager con il database

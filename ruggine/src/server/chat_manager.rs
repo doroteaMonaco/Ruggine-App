@@ -43,29 +43,42 @@ impl ChatManager {
     }
     
     pub async fn register_user(&self, username: String, addr: SocketAddr) -> Result<Uuid, String> {
-        // Controlla se l'username è già in uso
-        {
-            let usernames = self.usernames.read().await;
-            if usernames.contains_key(&username) {
-                return Err("Username already taken".to_string());
-            }
+        // Controlla se l'username è già in uso nel database
+        match self.db_manager.get_user_by_username(&username).await {
+            Ok(Some(_)) => return Err("Username already taken".to_string()),
+            Ok(None) => {}, // Username disponibile
+            Err(e) => return Err(format!("Database error: {}", e)),
         }
         
         // Crea nuovo utente
         let user_id = Uuid::new_v4();
-        let user = ConnectedUser {
+        
+        // Salva utente nel database
+        let user = User {
+            id: user_id,
+            username: username.clone(),
+            created_at: chrono::Utc::now(),
+            is_online: true,
+        };
+        
+        if let Err(e) = self.db_manager.create_user(&user).await {
+            return Err(format!("Failed to create user in database: {}", e));
+        }
+        
+        // Crea ConnectedUser per la gestione in memoria della connessione
+        let connected_user = ConnectedUser {
             id: user_id,
             username: username.clone(),
             addr,
             connected_at: chrono::Utc::now(),
         };
         
-        // Aggiungi ai mapping
+        // Aggiungi ai mapping in memoria per gestione connessioni
         {
             let mut users = self.users.write().await;
             let mut usernames = self.usernames.write().await;
             
-            users.insert(user_id, user);
+            users.insert(user_id, connected_user);
             usernames.insert(username.clone(), user_id);
         }
         
@@ -74,6 +87,12 @@ impl ChatManager {
     }
     
     pub async fn user_disconnected(&self, user_id: Uuid) {
+        // Aggiorna lo stato nel database
+        if let Err(e) = self.db_manager.update_user_online_status(user_id, false).await {
+            warn!("Failed to update user offline status in database: {}", e);
+        }
+        
+        // Rimuovi dalla gestione in memoria
         let mut users = self.users.write().await;
         let mut usernames = self.usernames.write().await;
         
@@ -96,14 +115,7 @@ impl ChatManager {
 
     // === GROUP MANAGEMENT ===
     pub async fn create_group(&self, creator_id: Uuid, group_name: String) -> Result<Uuid, String> {
-        // Controlla se il gruppo esiste già
-        {
-            let group_names = self.group_names.read().await;
-            if group_names.contains_key(&group_name) {
-                return Err("Group name already exists".to_string());
-            }
-        }
-
+        // Crea il gruppo nel database
         let group_id = Uuid::new_v4();
         let group = Group {
             id: group_id,
@@ -113,7 +125,13 @@ impl ChatManager {
             created_at: chrono::Utc::now(),
             members: vec![creator_id],
         };
-
+        
+        // Salva nel database
+        if let Err(e) = self.db_manager.create_group(&group).await {
+            return Err(format!("Failed to create group in database: {}", e));
+        }
+        
+        // Aggiorna cache in memoria
         {
             let mut groups = self.groups.write().await;
             let mut group_names = self.group_names.write().await;
@@ -127,56 +145,73 @@ impl ChatManager {
     }
 
     pub async fn get_user_groups(&self, user_id: Uuid) -> Vec<String> {
-        let groups = self.groups.read().await;
-        groups.values()
-            .filter(|group| group.members.contains(&user_id))
-            .map(|group| group.name.clone())
-            .collect()
+        // Ottieni gruppi dal database
+        match self.db_manager.get_user_groups(user_id).await {
+            Ok(groups) => groups.into_iter().map(|group| group.name).collect(),
+            Err(e) => {
+                warn!("Failed to get user groups from database: {}", e);
+                // Fallback alla cache in memoria
+                let groups = self.groups.read().await;
+                groups.values()
+                    .filter(|group| group.members.contains(&user_id))
+                    .map(|group| group.name.clone())
+                    .collect()
+            }
+        }
     }
 
     pub async fn invite_to_group(&self, inviter_id: Uuid, target_username: String, group_name: String) -> Result<Uuid, String> {
-        // Trova l'utente target
-        let target_id = {
-            let usernames = self.usernames.read().await;
-            match usernames.get(&target_username) {
-                Some(&id) => id,
-                None => return Err("User not found".to_string()),
-            }
+        // Trova l'utente target nel database
+        let target_user = match self.db_manager.get_user_by_username(&target_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err("User not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
         };
-
-        // Trova il gruppo
+        
+        // Trova il gruppo (prima prova in memoria, poi database)
         let group_id = {
             let group_names = self.group_names.read().await;
-            match group_names.get(&group_name) {
-                Some(&id) => id,
-                None => return Err("Group not found".to_string()),
+            if let Some(&id) = group_names.get(&group_name) {
+                id
+            } else {
+                // Fallback: cerca nel database se non è in cache
+                return Err("Group not found".to_string());
             }
         };
 
-        // Verifica che l'inviter sia membro del gruppo
-        {
-            let groups = self.groups.read().await;
-            if let Some(group) = groups.get(&group_id) {
-                if !group.members.contains(&inviter_id) {
-                    return Err("You are not a member of this group".to_string());
-                }
-                
-                if group.members.contains(&target_id) {
-                    return Err("User is already a member of this group".to_string());
-                }
-            }
+        // Verifica che l'inviter sia membro del gruppo (usa database)
+        let group_members = match self.db_manager.get_group_members(group_id).await {
+            Ok(members) => members,
+            Err(e) => return Err(format!("Failed to get group members: {}", e)),
+        };
+        
+        if !group_members.contains(&inviter_id) {
+            return Err("You are not a member of this group".to_string());
+        }
+        
+        if group_members.contains(&target_user.id) {
+            return Err("User is already a member of this group".to_string());
         }
 
+        // Crea l'invito
         let invite_id = Uuid::new_v4();
         let invite = GroupInvite {
             id: invite_id,
             group_id,
             inviter_id,
-            invitee_id: target_id,
+            invitee_id: target_user.id,
             created_at: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
             status: InviteStatus::Pending,
+            responded_at: None,
         };
 
+        // Salva nel database
+        if let Err(e) = self.db_manager.create_group_invite(&invite).await {
+            return Err(format!("Failed to create invite in database: {}", e));
+        }
+
+        // Aggiorna cache in memoria
         {
             let mut invites = self.invites.write().await;
             invites.insert(invite_id, invite);
@@ -196,14 +231,14 @@ impl ChatManager {
             }
         };
 
-        // Verifica che l'utente sia membro del gruppo
-        {
-            let groups = self.groups.read().await;
-            if let Some(group) = groups.get(&group_id) {
-                if !group.members.contains(&sender_id) {
-                    return Err("You are not a member of this group".to_string());
-                }
-            }
+        // Verifica che l'utente sia membro del gruppo (usa database)
+        let group_members = match self.db_manager.get_group_members(group_id).await {
+            Ok(members) => members,
+            Err(e) => return Err(format!("Failed to get group members: {}", e)),
+        };
+        
+        if !group_members.contains(&sender_id) {
+            return Err("You are not a member of this group".to_string());
         }
 
         let message = Message {
@@ -215,6 +250,12 @@ impl ChatManager {
             message_type: MessageType::Text,
         };
 
+        // Salva nel database
+        if let Err(e) = self.db_manager.save_message(&message).await {
+            warn!("Failed to save message to database: {}", e);
+        }
+
+        // Aggiorna cache in memoria
         {
             let mut messages = self.messages.write().await;
             messages.push(message);
@@ -225,13 +266,11 @@ impl ChatManager {
     }
 
     pub async fn send_private_message(&self, sender_id: Uuid, target_username: String, content: String) -> Result<(), String> {
-        // Trova l'utente target
-        let _target_id = {
-            let usernames = self.usernames.read().await;
-            match usernames.get(&target_username) {
-                Some(&id) => id,
-                None => return Err("User not found".to_string()),
-            }
+        // Trova l'utente target nel database
+        let target_user = match self.db_manager.get_user_by_username(&target_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err("User not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
         };
 
         let message = Message {
@@ -243,6 +282,16 @@ impl ChatManager {
             message_type: MessageType::Text,
         };
 
+        // Salva nel database usando la funzione specifica per messaggi diretti
+        let message_id = match self.db_manager.save_direct_message(sender_id, target_user.id, &content, MessageType::Text).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Failed to save private message to database: {}", e);
+                message.id // Usa l'ID generato localmente come fallback
+            }
+        };
+
+        // Aggiorna cache in memoria
         {
             let mut messages = self.messages.write().await;
             messages.push(message);
@@ -253,51 +302,87 @@ impl ChatManager {
     }
 
     pub async fn get_user_invites(&self, user_id: Uuid) -> Vec<String> {
-        let invites = self.invites.read().await;
-        let groups = self.groups.read().await;
-        let users = self.users.read().await;
+        // Ottieni inviti dal database
+        match self.db_manager.get_pending_invites(user_id).await {
+            Ok(invites) => {
+                let mut result = Vec::new();
+                for invite in invites {
+                    // Per ogni invito, ottieni le informazioni del gruppo e dell'inviter
+                    if let Ok(groups) = self.db_manager.get_user_groups(invite.inviter_id).await {
+                        if let Some(group) = groups.iter().find(|g| g.id == invite.group_id) {
+                            if let Ok(Some(inviter)) = self.db_manager.get_user_by_username("").await {
+                                // Nota: dovremmo avere una funzione get_user_by_id nel database
+                                let info = format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
+                                    invite.id, 
+                                    group.name, 
+                                    "unknown", // Temporaneo finché non aggiungiamo get_user_by_id
+                                    invite.created_at.format("%Y-%m-%d %H:%M")
+                                );
+                                result.push(info);
+                            }
+                        }
+                    }
+                }
+                result
+            }
+            Err(e) => {
+                warn!("Failed to get user invites from database: {}", e);
+                // Fallback alla cache in memoria
+                let invites = self.invites.read().await;
+                let groups = self.groups.read().await;
+                let users = self.users.read().await;
 
-        invites.values()
-            .filter(|invite| invite.invitee_id == user_id && matches!(invite.status, InviteStatus::Pending))
-            .filter_map(|invite| {
-                let group = groups.get(&invite.group_id)?;
-                let inviter = users.get(&invite.inviter_id)?;
-                Some(format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
-                    invite.id, 
-                    group.name, 
-                    inviter.username,
-                    invite.created_at.format("%Y-%m-%d %H:%M")
-                ))
-            })
-            .collect()
+                invites.values()
+                    .filter(|invite| invite.invitee_id == user_id && matches!(invite.status, InviteStatus::Pending))
+                    .filter_map(|invite| {
+                        let group = groups.get(&invite.group_id)?;
+                        let inviter = users.get(&invite.inviter_id)?;
+                        Some(format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
+                            invite.id, 
+                            group.name, 
+                            inviter.username,
+                            invite.created_at.format("%Y-%m-%d %H:%M")
+                        ))
+                    })
+                    .collect()
+            }
+        }
     }
 
     pub async fn accept_invite(&self, user_id: Uuid, invite_id: Uuid) -> Result<String, String> {
+        // Accetta l'invito nel database
+        if let Err(e) = self.db_manager.accept_group_invite(invite_id).await {
+            return Err(format!("Failed to accept invite in database: {}", e));
+        }
+        
+        // Ottieni le informazioni dell'invito per il nome del gruppo
         let group_name = {
             let mut invites = self.invites.write().await;
-            let invite = invites.get_mut(&invite_id)
-                .ok_or("Invite not found")?;
+            if let Some(invite) = invites.get_mut(&invite_id) {
+                if invite.invitee_id != user_id {
+                    return Err("This invite is not for you".to_string());
+                }
 
-            if invite.invitee_id != user_id {
-                return Err("This invite is not for you".to_string());
+                if !matches!(invite.status, InviteStatus::Pending) {
+                    return Err("Invite is no longer pending".to_string());
+                }
+
+                invite.status = InviteStatus::Accepted;
+                invite.responded_at = Some(chrono::Utc::now());
+
+                // Aggiungi l'utente al gruppo nella cache
+                let mut groups = self.groups.write().await;
+                if let Some(group) = groups.get_mut(&invite.group_id) {
+                    if !group.members.contains(&user_id) {
+                        group.members.push(user_id);
+                    }
+                    group.name.clone()
+                } else {
+                    "Unknown Group".to_string()
+                }
+            } else {
+                return Err("Invite not found".to_string());
             }
-
-            if !matches!(invite.status, InviteStatus::Pending) {
-                return Err("Invite is no longer pending".to_string());
-            }
-
-            invite.status = InviteStatus::Accepted;
-
-            // Aggiungi l'utente al gruppo
-            let mut groups = self.groups.write().await;
-            let group = groups.get_mut(&invite.group_id)
-                .ok_or("Group not found")?;
-
-            if !group.members.contains(&user_id) {
-                group.members.push(user_id);
-            }
-
-            group.name.clone()
         };
 
         info!("User {} accepted invite to group '{}'", user_id, group_name);
@@ -319,6 +404,7 @@ impl ChatManager {
             }
 
             invite.status = InviteStatus::Rejected;
+            invite.responded_at = Some(chrono::Utc::now());
 
             let groups = self.groups.read().await;
             let group = groups.get(&invite.group_id)

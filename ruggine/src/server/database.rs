@@ -11,16 +11,14 @@ pub struct DatabaseManager {
 }
 
 impl DatabaseManager {
-    /// Crea una nuova connessione al database
+    /// Crea una nuova connessione al database esistente
     pub async fn new(database_url: &str) -> Result<Self> {
-        info!("Connecting to database: {}", database_url);
+        info!("Connecting to existing database: {}", database_url);
         
-        let pool = SqlitePool::connect(database_url).await?;
+        let pool = SqlitePool::connect(database_url).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to database '{}': {}", database_url, e))?;
         
-        // Esegui le migrazioni
-        sqlx::migrate!("./migrations").run(&pool).await?;
-        
-        info!("Database connection established and migrations applied");
+        info!("Database connection established successfully");
         
         Ok(Self { pool })
     }
@@ -275,8 +273,8 @@ impl DatabaseManager {
     pub async fn create_group_invite(&self, invite: &GroupInvite) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO group_invites (id, group_id, inviter_id, invitee_id, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO group_invites (id, group_id, inviter_id, invitee_id, created_at, expires_at, status, responded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(invite.id.to_string())
@@ -284,7 +282,9 @@ impl DatabaseManager {
         .bind(invite.inviter_id.to_string())
         .bind(invite.invitee_id.to_string())
         .bind(invite.created_at.to_rfc3339())
+        .bind(invite.expires_at.map(|dt| dt.to_rfc3339()))
         .bind(format!("{:?}", invite.status))
+        .bind(invite.responded_at.map(|dt| dt.to_rfc3339()))
         .execute(&self.pool)
         .await?;
 
@@ -296,7 +296,7 @@ impl DatabaseManager {
     pub async fn get_pending_invites(&self, user_id: Uuid) -> Result<Vec<GroupInvite>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, group_id, inviter_id, invitee_id, created_at, status
+            SELECT id, group_id, inviter_id, invitee_id, created_at, expires_at, status, responded_at
             FROM group_invites
             WHERE invitee_id = ? AND status = 'Pending'
             ORDER BY created_at DESC
@@ -308,13 +308,25 @@ impl DatabaseManager {
 
         let mut invites = Vec::new();
         for row in rows {
+            let expires_at = row.get::<Option<String>, _>("expires_at")
+                .map(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .flatten()
+                .map(|dt| dt.with_timezone(&Utc));
+                
+            let responded_at = row.get::<Option<String>, _>("responded_at")
+                .map(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .flatten()
+                .map(|dt| dt.with_timezone(&Utc));
+                
             let invite = GroupInvite {
                 id: Uuid::parse_str(&row.get::<String, _>("id"))?,
                 group_id: Uuid::parse_str(&row.get::<String, _>("group_id"))?,
                 inviter_id: Uuid::parse_str(&row.get::<String, _>("inviter_id"))?,
                 invitee_id: Uuid::parse_str(&row.get::<String, _>("invitee_id"))?,
                 created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
-                status: InviteStatus::Pending,
+                expires_at,
+                status: InviteStatus::Pending, // Già filtrato nella query
+                responded_at,
             };
             invites.push(invite);
         }
@@ -469,5 +481,36 @@ impl DatabaseManager {
             .await?;
 
         Ok((users_count as usize, groups_count as usize, messages_count as usize, pending_invites as usize))
+    }
+
+    /// Aggiunge un utente a un gruppo
+    pub async fn add_user_to_group(&self, group_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id, joined_at) 
+             VALUES (?, ?, ?)
+             ON CONFLICT(group_id, user_id) DO NOTHING"
+        )
+        .bind(group_id.to_string())
+        .bind(user_id.to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        
+        info!("User {} added to group {}", user_id, group_id);
+        Ok(())
+    }
+
+    /// Rimuove un utente da un gruppo
+    pub async fn remove_user_from_group(&self, group_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM group_members WHERE group_id = ? AND user_id = ?"
+        )
+        .bind(group_id.to_string())
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        
+        info!("User {} removed from group {}", user_id, group_id);
+        Ok(())
     }
 }

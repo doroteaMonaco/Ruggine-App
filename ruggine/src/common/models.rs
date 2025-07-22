@@ -51,7 +51,9 @@ pub struct GroupInvite {
     pub inviter_id: Uuid,
     pub invitee_id: Uuid,
     pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
     pub status: InviteStatus,
+    pub responded_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
