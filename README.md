@@ -45,3 +45,6 @@ telnet localhost 5000
 /users
 /help
 /quit
+
+__TRACCIA__
+Realizzare un’applicazione in RUST, dal titolo Ruggine, di tipo client/server per gestire una chat di scambio di messaggi testuali. La chat deve prevedere la possibilità di creare gruppi di utenti per la condivisione di messaggi. L’ammissione alla Chat è effettuata al primo avvio del programma, inviando al server una richiesta di iscrizione, mentre l’ingresso in un gruppo avviene solo su invito. Il programma deve girare su almeno 2 tra le diverse piattaforme disponibili (Windows, Linux, MacOS, Android, ChromeOS, iOS). Si richiede di porre attenzione alle prestazioni del sistema in termini di consumo di tempo di CPU e di dimensione dell’applicativo. L’applicazione deve generare un file di log, riportando i dettagli sull’utilizzo di CPU ogni 2 minuti. Si richiede inoltre di riportare nel report descrittivo del progetto la dimensione del file eseguibile.
