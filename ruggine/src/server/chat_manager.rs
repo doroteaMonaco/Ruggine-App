@@ -4,54 +4,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use log::{info, warn};
+use crate::database::DatabaseManager;
 
-// Definizioni locali per ora (poi useremo i modelli comuni)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Group {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub created_by: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub members: Vec<Uuid>,
-}
+// Import dei modelli comuni
+use crate::common::models::{Group, GroupInvite, InviteStatus, Message, MessageType, User};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GroupInvite {
-    pub id: Uuid,
-    pub group_id: Uuid,
-    pub inviter_id: Uuid,
-    pub invitee_id: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub status: InviteStatus,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum InviteStatus {
-    Pending,
-    Accepted,
-    Rejected,
-    Expired,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Message {
-    pub id: Uuid,
-    pub sender_id: Uuid,
-    pub group_id: Option<Uuid>,
-    pub content: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub message_type: MessageType,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum MessageType {
-    Text,
-    SystemNotification,
-    UserJoined,
-    UserLeft,
-}
-
+// Struttura per utenti connessi (specifica del server)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectedUser {
     pub id: Uuid,
@@ -68,10 +26,11 @@ pub struct ChatManager {
     group_names: Arc<RwLock<HashMap<String, Uuid>>>, // group_name -> group_id
     invites: Arc<RwLock<HashMap<Uuid, GroupInvite>>>, // invite_id -> invite
     messages: Arc<RwLock<Vec<Message>>>, // All messages
+    db_manager: Arc<DatabaseManager>, // Database manager
 }
 
 impl ChatManager {
-    pub fn new() -> Self {
+    pub fn new(db_manager: Arc<DatabaseManager>) -> Self {
         Self {
             users: Arc::new(RwLock::new(HashMap::new())),
             usernames: Arc::new(RwLock::new(HashMap::new())),
@@ -79,6 +38,7 @@ impl ChatManager {
             group_names: Arc::new(RwLock::new(HashMap::new())),
             invites: Arc::new(RwLock::new(HashMap::new())),
             messages: Arc::new(RwLock::new(Vec::new())),
+            db_manager,
         }
     }
     
@@ -266,7 +226,7 @@ impl ChatManager {
 
     pub async fn send_private_message(&self, sender_id: Uuid, target_username: String, content: String) -> Result<(), String> {
         // Trova l'utente target
-        let target_id = {
+        let _target_id = {
             let usernames = self.usernames.read().await;
             match usernames.get(&target_username) {
                 Some(&id) => id,

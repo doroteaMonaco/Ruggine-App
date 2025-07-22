@@ -1,5 +1,13 @@
 mod chat_manager;
 mod connection;
+mod database;
+
+// Importiamo i moduli comuni
+#[path = "../common/mod.rs"]
+mod common;
+
+#[path = "../utils/mod.rs"]
+mod utils;
 
 use clap::Parser;
 use log::{info, warn, error};
@@ -9,6 +17,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use connection::ClientConnection;
 use chat_manager::ChatManager;
+use database::DatabaseManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "ruggine-server")]
@@ -34,8 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Listening on {}:{}", args.host, args.port);
     info!("Maximum clients: {}", args.max_clients);
     
-    // Inizializza il chat manager
-    let chat_manager = Arc::new(ChatManager::new());
+    // Inizializza il database
+    let database_url = "sqlite:ruggine.db";
+    let db_manager = Arc::new(DatabaseManager::new(database_url).await?);
+    info!("Database initialized successfully");
+    
+    // Inizializza il chat manager con il database
+    let chat_manager = Arc::new(ChatManager::new(Arc::clone(&db_manager)));
     let connection_count = Arc::new(RwLock::new(0usize));
     
     // Bind del listener TCP
