@@ -38,7 +38,7 @@ struct Args {
     #[arg(short, long, help = "Server port (overrides config)")]
     port: Option<u16>,
     
-    #[arg(short, long, help = "Username for connection")]
+    #[arg(short, long, help = "Username for connection (overrides config)")]
     username: Option<String>,
     
     #[arg(long, help = "Auto-connect as local host using config")]
@@ -61,22 +61,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port, username) = if args.auto {
         // Modalità automatica - host locale
         info!("🏠 Auto-connecting as local host...");
-        let username = get_username_from_user(args.username)?;
-        (config.default_host.clone(), config.default_port, username)
+        (
+            config.default_host.clone(),
+            config.default_port,
+            args.username.unwrap_or(config.default_username.clone())
+        )
     } else if args.remote {
         // Modalità remota - usa IP pubblico
         info!("🌐 Connecting as remote client...");
-        let username = get_username_from_user(args.username)?;
-        (config.public_host.clone(), config.default_port, username)
+        (
+            config.public_host.clone(),
+            config.default_port,
+            args.username.unwrap_or_else(|| {
+                println!("� Enter your username:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                input.trim().to_string()
+            })
+        )
     } else {
         // Modalità manuale - usa argomenti o valori predefiniti
         let host = args.host.unwrap_or(config.default_host.clone());
         let port = args.port.unwrap_or(config.default_port);
-        let username = get_username_from_user(args.username)?;
+        let username = if let Some(username) = args.username {
+            username
+        } else {
+            println!("📝 Enter your username:");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            input.trim().to_string()
+        };
         (host, port, username)
     };
     
-    info!("🚀 Starting Ruggine client...");
+    info!("�🚀 Starting Ruggine client...");
     println!("🔗 Connecting to {}:{} as '{}'", host, port, username);
     
     // Connessione al server
