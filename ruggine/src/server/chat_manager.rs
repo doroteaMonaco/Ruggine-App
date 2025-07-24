@@ -131,11 +131,6 @@ impl ChatManager {
             return Err(format!("Failed to create group in database: {}", e));
         }
         
-        // Aggiungi il creatore come membro del gruppo
-        if let Err(e) = self.db_manager.add_user_to_group(group_id, creator_id).await {
-            warn!("Failed to add creator to group in database: {}", e);
-        }
-        
         // Aggiorna cache in memoria
         {
             let mut groups = self.groups.write().await;
@@ -288,7 +283,7 @@ impl ChatManager {
         };
 
         // Salva nel database usando la funzione specifica per messaggi diretti
-        let message_id = match self.db_manager.save_direct_message(sender_id, target_user.id, &content, MessageType::Text).await {
+        let _message_id = match self.db_manager.save_direct_message(sender_id, target_user.id, &content, MessageType::Text).await {
             Ok(id) => id,
             Err(e) => {
                 warn!("Failed to save private message to database: {}", e);
@@ -315,7 +310,7 @@ impl ChatManager {
                     // Per ogni invito, ottieni le informazioni del gruppo e dell'inviter
                     if let Ok(groups) = self.db_manager.get_user_groups(invite.inviter_id).await {
                         if let Some(group) = groups.iter().find(|g| g.id == invite.group_id) {
-                            if let Ok(Some(inviter)) = self.db_manager.get_user_by_username("").await {
+                            if let Ok(Some(_inviter)) = self.db_manager.get_user_by_username("").await {
                                 // Nota: dovremmo avere una funzione get_user_by_id nel database
                                 let info = format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
                                     invite.id, 

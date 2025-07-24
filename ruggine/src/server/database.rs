@@ -308,13 +308,23 @@ impl DatabaseManager {
 
         let mut invites = Vec::new();
         for row in rows {
+            let expires_at = row.get::<Option<String>, _>("expires_at")
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+                
+            let responded_at = row.get::<Option<String>, _>("responded_at")
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+                
             let invite = GroupInvite {
                 id: Uuid::parse_str(&row.get::<String, _>("id"))?,
                 group_id: Uuid::parse_str(&row.get::<String, _>("group_id"))?,
                 inviter_id: Uuid::parse_str(&row.get::<String, _>("inviter_id"))?,
                 invitee_id: Uuid::parse_str(&row.get::<String, _>("invitee_id"))?,
                 created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
+                expires_at,
                 status: InviteStatus::Pending,
+                responded_at,
             };
             invites.push(invite);
         }
@@ -446,7 +456,30 @@ impl DatabaseManager {
         Ok(users)
     }
 
-    /// Ottieni statistiche del database
+    /// Aggiunge un utente a un gruppo
+    pub async fn add_user_to_group(&self, group_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query("INSERT INTO group_members (group_id, user_id, joined_at) VALUES (?, ?, ?)")
+            .bind(group_id.to_string())
+            .bind(user_id.to_string())
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        
+        info!("Added user {} to group {}", user_id, group_id);
+        Ok(())
+    }
+
+    /// Rimuove un utente da un gruppo
+    pub async fn remove_user_from_group(&self, group_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
+            .bind(group_id.to_string())
+            .bind(user_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        
+        info!("Removed user {} from group {}", user_id, group_id);
+        Ok(())
+    }
     pub async fn get_database_stats(&self) -> Result<(usize, usize, usize, usize)> {
         // Conta utenti
         let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")

@@ -1,6 +1,7 @@
 mod chat_manager;
 mod connection;
 mod database;
+mod config;
 
 // Importiamo i moduli comuni
 #[path = "../common/mod.rs"]
@@ -58,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Task di monitoring delle performance (ogni 2 minuti)
     let chat_manager_monitoring = Arc::clone(&chat_manager);
-    let monitoring_task = tokio::spawn(async move {
+    let _monitoring_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(120));
         
         // Crea il file di log delle performance se non esiste
