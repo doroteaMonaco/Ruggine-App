@@ -17,10 +17,7 @@ impl DatabaseManager {
         
         let pool = SqlitePool::connect(database_url).await?;
         
-        // Esegui le migrazioni
-        sqlx::migrate!("./migrations").run(&pool).await?;
-        
-        info!("Database connection established and migrations applied");
+        info!("Database connection established");
         
         Ok(Self { pool })
     }

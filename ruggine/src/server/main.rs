@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use connection::ClientConnection;
 use chat_manager::ChatManager;
 use database::DatabaseManager;
+use config::Config;
 
 #[derive(Parser, Debug)]
 #[command(name = "ruggine-server")]
@@ -40,13 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let args = Args::parse();
     
+    // Carica la configurazione dal file .env
+    let config = Config::load()?;
+    
     info!("Starting Ruggine server...");
     info!("Listening on {}:{}", args.host, args.port);
     info!("Maximum clients: {}", args.max_clients);
     
-    // Inizializza il database
-    let database_url = "sqlite:ruggine.db";
-    let db_manager = Arc::new(DatabaseManager::new(database_url).await?);
+    // Inizializza il database usando la configurazione
+    let db_manager = Arc::new(DatabaseManager::new(&config.database_url).await?);
     info!("Database initialized successfully");
     
     // Inizializza il chat manager con il database

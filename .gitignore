@@ -24,6 +24,17 @@ Thumbs.db
 **/ruggine_performance.log
 *.log
 
+# Database files (commentato - vogliamo tracciare il database statico)
+# data/
+# *.db
+# *.sqlite
+# *.sqlite3
+
+# Environment files (commentato - vogliamo tracciare .env per collaborazione)
+# .env
+# .env.local
+# .env.production
+
 # Temporary files
 *.tmp
 *.temp
