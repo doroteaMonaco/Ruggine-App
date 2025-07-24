@@ -11,6 +11,11 @@ pub struct Config {
     pub performance_metrics_retention_days: u32,
     pub backup_enabled: bool,
     pub backup_interval_hours: u32,
+    // Configurazioni di rete
+    pub server_host: String,
+    pub server_port: u16,
+    pub max_clients: usize,
+    pub enable_encryption: bool,
 }
 
 impl Config {
@@ -45,6 +50,21 @@ impl Config {
                 .unwrap_or_else(|_| "24".to_string())
                 .parse()
                 .unwrap_or(24),
+            // Configurazioni di rete
+            server_host: env::var("SERVER_HOST")
+                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            server_port: env::var("SERVER_PORT")
+                .unwrap_or_else(|_| "5000".to_string())
+                .parse()
+                .unwrap_or(5000),
+            max_clients: env::var("MAX_CLIENTS")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .unwrap_or(100),
+            enable_encryption: env::var("ENABLE_ENCRYPTION")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true),
         };
 
         log::info!("Configuration loaded:");
@@ -56,6 +76,10 @@ impl Config {
         log::info!("  Performance Metrics Retention: {} days", config.performance_metrics_retention_days);
         log::info!("  Backup Enabled: {}", config.backup_enabled);
         log::info!("  Backup Interval: {} hours", config.backup_interval_hours);
+        log::info!("  Server Host: {}", config.server_host);
+        log::info!("  Server Port: {}", config.server_port);
+        log::info!("  Max Clients: {}", config.max_clients);
+        log::info!("  Encryption Enabled: {}", config.enable_encryption);
 
         Ok(config)
     }

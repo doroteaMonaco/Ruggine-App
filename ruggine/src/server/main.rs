@@ -25,7 +25,7 @@ use config::Config;
 #[command(name = "ruggine-server")]
 #[command(about = "A chat server application")]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1")] //TODO lochalost
+    #[arg(long, default_value = "0.0.0.0")] // Accetta connessioni da qualsiasi IP
     host: String,
     
     #[arg(short, long, default_value = "5000")]
