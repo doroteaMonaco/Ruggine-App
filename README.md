@@ -51,5 +51,6 @@ Realizzare un’applicazione in RUST, dal titolo Ruggine, di tipo client/server 
 
 
 //TODO 
-Nel db inserisci i membri senza acceto invito
-Joig groups carpire se serve
+Nel db inserisci i membri senza acceto invito --> VEDERE
+Gestire bene is online (e last_seen)
+Correggere active_users in performance.log

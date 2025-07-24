@@ -106,21 +106,6 @@ async fn process_command(
         "/help" => {
             send_help(writer).await?;
         }
-        "/save" => {
-            if user_id.is_none() {
-                send_error(writer, "Please register first").await?;
-                return Ok(());
-            }
-            
-            match chat_manager.save_to_file().await {
-                Ok(_) => {
-                    send_success(writer, "Server data saved to ruggine_data.json").await?;
-                }
-                Err(e) => {
-                    send_error(writer, &format!("Failed to save data: {}", e)).await?;
-                }
-            }
-        }
         "/quit" => {
             send_success(writer, "Goodbye!").await?;
             return Err("DISCONNECT_REQUESTED".into());
@@ -300,6 +285,26 @@ async fn process_command(
                 }
                 Err(_) => {
                     send_error(writer, "Invalid invite ID format").await?;
+                }
+            }
+        }
+        "/leave_group" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /leave_group <group_name>").await?;
+                return Ok(());
+            }
+            
+            let group_name = parts[1];
+            match chat_manager.leave_group(user_id.unwrap(), group_name.to_string()).await {
+                Ok(message) => {
+                    send_success(writer, &message).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to leave group: {}", e)).await?;
                 }
             }
         }

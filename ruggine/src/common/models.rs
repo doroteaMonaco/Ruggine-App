@@ -27,7 +27,8 @@ pub struct Group {
 pub struct Message {
     pub id: Uuid,
     pub sender_id: Uuid,
-    pub group_id: Option<Uuid>, // None per messaggi diretti
+    pub group_id: Option<Uuid>,    // Some = messaggio di gruppo
+    pub receiver_id: Option<Uuid>, // Some = messaggio privato (quando group_id è None)
     pub content: String,
     pub timestamp: DateTime<Utc>,
     pub message_type: MessageType,
@@ -41,6 +42,19 @@ pub enum MessageType {
     UserLeft,
     GroupCreated,
     UserInvited,
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageType::Text => write!(f, "text"),
+            MessageType::SystemNotification => write!(f, "system_notification"),
+            MessageType::UserJoined => write!(f, "user_joined"),
+            MessageType::UserLeft => write!(f, "user_left"),
+            MessageType::GroupCreated => write!(f, "group_created"),
+            MessageType::UserInvited => write!(f, "user_invited"),
+        }
+    }
 }
 
 /// Rappresenta un invito a un gruppo

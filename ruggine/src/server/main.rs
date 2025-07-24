@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             system.refresh_cpu();
             let cpu_usage: f32 = system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / system.cpus().len() as f32;
             
-            let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             
             // Log su console (come prima)
             info!("📊 Performance Metrics - Active Users: {}, Groups: {}, Total Messages: {}", 

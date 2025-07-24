@@ -170,7 +170,7 @@ impl DatabaseManager {
         .bind(message.id.to_string())
         .bind(message.sender_id.to_string())
         .bind(message.group_id.map(|id| id.to_string()))
-        .bind(None::<String>) // receiver_id per messaggi diretti - da implementare nel modello Message
+        .bind(message.receiver_id.map(|id| id.to_string()))
         .bind(&message.content)
         .bind(message.timestamp.to_rfc3339())
         .bind(format!("{:?}", message.message_type))
@@ -201,6 +201,7 @@ impl DatabaseManager {
                 id: Uuid::parse_str(&row.get::<String, _>("id"))?,
                 sender_id: Uuid::parse_str(&row.get::<String, _>("sender_id"))?,
                 group_id: Some(group_id),
+                receiver_id: None, // Per messaggi di gruppo, receiver_id è None
                 content: row.get("content"),
                 timestamp: DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp"))?.with_timezone(&Utc),
                 message_type: match row.get::<String, _>("message_type").as_str() {
@@ -248,6 +249,9 @@ impl DatabaseManager {
                 id: Uuid::parse_str(&row.get::<String, _>("id"))?,
                 sender_id: Uuid::parse_str(&row.get::<String, _>("sender_id"))?,
                 group_id: None,
+                receiver_id: row.get::<Option<String>, _>("receiver_id")
+                    .map(|s| Uuid::parse_str(&s))
+                    .transpose()?,
                 content: row.get("content"),
                 timestamp: DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp"))?.with_timezone(&Utc),
                 message_type: match row.get::<String, _>("message_type").as_str() {
@@ -499,5 +503,54 @@ impl DatabaseManager {
             .await?;
 
         Ok((users_count as usize, groups_count as usize, messages_count as usize, pending_invites as usize))
+    }
+
+    /// Controlla se un utente è membro di un gruppo
+    pub async fn is_user_in_group(&self, user_id: Uuid, group_id: Uuid) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM group_members WHERE user_id = ? AND group_id = ?"
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count > 0)
+    }
+
+    /// Salva un messaggio di gruppo e restituisce l'ID
+    pub async fn save_group_message(&self, sender_id: Uuid, group_id: Uuid, content: &str, message_type: MessageType) -> Result<Uuid> {
+        let message_id = Uuid::new_v4();
+        
+        sqlx::query(
+            "INSERT INTO messages (id, sender_id, group_id, receiver_id, content, message_type, timestamp) VALUES (?, ?, ?, NULL, ?, ?, ?)"
+        )
+        .bind(message_id)
+        .bind(sender_id)
+        .bind(group_id)
+        .bind(content)
+        .bind(message_type.to_string())
+        .bind(chrono::Utc::now())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(message_id)
+    }
+
+    /// Ottieni gli inviti pendenti per un utente (alias per get_pending_invites)
+    pub async fn get_user_pending_invites(&self, user_id: Uuid) -> Result<Vec<GroupInvite>> {
+        self.get_pending_invites(user_id).await
+    }
+
+    /// Rifiuta un invito di gruppo
+    pub async fn reject_group_invite(&self, invite_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE group_invites SET status = 'rejected' WHERE id = ?"
+        )
+        .bind(invite_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }

@@ -245,6 +245,7 @@ impl ChatManager {
             id: Uuid::new_v4(),
             sender_id,
             group_id: Some(group_id),
+            receiver_id: None, // Messaggio di gruppo, non ha receiver specifico
             content: content.clone(),
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Text,
@@ -277,6 +278,7 @@ impl ChatManager {
             id: Uuid::new_v4(),
             sender_id,
             group_id: None, // None indica messaggio privato
+            receiver_id: Some(target_user.id), // Destinatario del messaggio privato
             content: content.clone(),
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Text,
@@ -390,68 +392,82 @@ impl ChatManager {
     }
 
     pub async fn reject_invite(&self, user_id: Uuid, invite_id: Uuid) -> Result<String, String> {
+        // Aggiorna l'invito nel database
+        if let Err(e) = self.db_manager.reject_group_invite(invite_id).await {
+            return Err(format!("Failed to reject invite: {}", e));
+        }
+
+        // Aggiorna la memoria locale
         let group_name = {
             let mut invites = self.invites.write().await;
-            let invite = invites.get_mut(&invite_id)
-                .ok_or("Invite not found")?;
+            if let Some(invite) = invites.get_mut(&invite_id) {
+                if invite.invitee_id != user_id {
+                    return Err("This invite is not for you".to_string());
+                }
 
-            if invite.invitee_id != user_id {
-                return Err("This invite is not for you".to_string());
+                if !matches!(invite.status, InviteStatus::Pending) {
+                    return Err("Invite is no longer pending".to_string());
+                }
+
+                invite.status = InviteStatus::Rejected;
+
+                let groups = self.groups.read().await;
+                if let Some(group) = groups.get(&invite.group_id) {
+                    group.name.clone()
+                } else {
+                    "Unknown Group".to_string()
+                }
+            } else {
+                return Err("Invite not found".to_string());
             }
-
-            if !matches!(invite.status, InviteStatus::Pending) {
-                return Err("Invite is no longer pending".to_string());
-            }
-
-            invite.status = InviteStatus::Rejected;
-
-            let groups = self.groups.read().await;
-            let group = groups.get(&invite.group_id)
-                .ok_or("Group not found")?;
-
-            group.name.clone()
         };
 
         info!("User {} rejected invite to group '{}'", user_id, group_name);
         Ok(group_name)
     }
 
-    // === PERFORMANCE & PERSISTENCE ===
-    pub async fn save_to_file(&self) -> Result<(), String> {
-        use std::fs;
-        use serde_json;
-
-        let groups_data = {
-            let groups = self.groups.read().await;
-            groups.iter().map(|(k, v)| (k.to_string(), v.clone())).collect::<std::collections::HashMap<String, Group>>()
-        };
-
-        let invites_data = {
-            let invites = self.invites.read().await;
-            invites.iter().map(|(k, v)| (k.to_string(), v.clone())).collect::<std::collections::HashMap<String, GroupInvite>>()
-        };
-
-        let messages_data = {
-            let messages = self.messages.read().await;
-            messages.clone()
-        };
-
-        let data = serde_json::json!({
-            "groups": groups_data,
-            "invites": invites_data,
-            "messages": messages_data
-        });
-
-        fs::write("ruggine_data.json", serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        info!("Server data saved to ruggine_data.json");
-        Ok(())
+    /// Ottieni gli inviti pendenti per un utente
+    pub async fn get_user_pending_invites(&self, user_id: Uuid) -> Result<Vec<GroupInvite>, String> {
+        match self.db_manager.get_user_pending_invites(user_id).await {
+            Ok(invites) => Ok(invites),
+            Err(e) => Err(format!("Database error: {}", e)),
+        }
     }
 
+    /// Lascia un gruppo
+    pub async fn leave_group(&self, user_id: Uuid, group_name: String) -> Result<String, String> {
+        // Trova il gruppo per nome
+        let group_id = {
+            let group_names = self.group_names.read().await;
+            group_names.get(&group_name).copied()
+                .ok_or_else(|| "Group not found".to_string())?
+        };
+
+        // Rimuovi l'utente dal gruppo nel database
+        if let Err(e) = self.db_manager.remove_user_from_group(group_id, user_id).await {
+            return Err(format!("Failed to leave group: {}", e));
+        }
+
+        info!("User {} left group '{}'", user_id, group_name);
+        Ok(format!("Left group '{}'", group_name))
+    }
+
+    // === PERFORMANCE & PERSISTENCE ===
     pub async fn get_performance_metrics(&self) -> (usize, usize, usize) {
-        let user_count = self.users.read().await.len();
-        let group_count = self.groups.read().await.len();
-        let message_count = self.messages.read().await.len();
-        (user_count, group_count, message_count)
+        // Recupera statistiche dal database per dati persistenti
+        match self.db_manager.get_database_stats().await {
+            Ok((users_db, groups_db, messages_db, _invites)) => {
+                // Usa i dati dal database che sono persistenti
+                (users_db, groups_db, messages_db)
+            },
+            Err(e) => {
+                warn!("Failed to get database stats, using memory stats: {}", e);
+                // Fallback ai dati in memoria se il database fallisce
+                let user_count = self.users.read().await.len();
+                let group_count = self.groups.read().await.len();
+                let message_count = self.messages.read().await.len();
+                (user_count, group_count, message_count)
+            }
+        }
     }
 }
