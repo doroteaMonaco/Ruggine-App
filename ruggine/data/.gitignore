@@ -1,8 +1,0 @@
-# Database files - escludiamo i dati di sviluppo
-*.db
-*.db-journal
-*.sqlite
-*.sqlite3
-
-# Performance logs
-*.log

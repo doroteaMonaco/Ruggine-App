@@ -16,7 +16,6 @@ crossterm = "0.27"
 sysinfo = "0.30"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 anyhow = "1.0"
-dotenv = "0.15"
 
 [features]
 default = ["client", "server"]  # Abilita entrambe per default

@@ -131,6 +131,11 @@ impl ChatManager {
             return Err(format!("Failed to create group in database: {}", e));
         }
         
+        // Aggiungi il creatore come membro del gruppo
+        if let Err(e) = self.db_manager.add_user_to_group(group_id, creator_id).await {
+            warn!("Failed to add creator to group in database: {}", e);
+        }
+        
         // Aggiorna cache in memoria
         {
             let mut groups = self.groups.write().await;
@@ -404,7 +409,6 @@ impl ChatManager {
             }
 
             invite.status = InviteStatus::Rejected;
-            invite.responded_at = Some(chrono::Utc::now());
 
             let groups = self.groups.read().await;
             let group = groups.get(&invite.group_id)
