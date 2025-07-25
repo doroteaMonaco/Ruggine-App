@@ -276,8 +276,8 @@ impl DatabaseManager {
     pub async fn create_group_invite(&self, invite: &GroupInvite) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO group_invites (id, group_id, inviter_id, invitee_id, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO group_invites (id, group_id, inviter_id, invitee_id, created_at, expires_at, status, responded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(invite.id.to_string())
@@ -285,7 +285,9 @@ impl DatabaseManager {
         .bind(invite.inviter_id.to_string())
         .bind(invite.invitee_id.to_string())
         .bind(invite.created_at.to_rfc3339())
+        .bind(invite.expires_at.map(|dt| dt.to_rfc3339()))
         .bind(format!("{:?}", invite.status))
+        .bind(invite.responded_at.map(|dt| dt.to_rfc3339()))
         .execute(&self.pool)
         .await?;
 
@@ -297,7 +299,7 @@ impl DatabaseManager {
     pub async fn get_pending_invites(&self, user_id: Uuid) -> Result<Vec<GroupInvite>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, group_id, inviter_id, invitee_id, created_at, status
+            SELECT id, group_id, inviter_id, invitee_id, created_at, status, expires_at, responded_at
             FROM group_invites
             WHERE invitee_id = ? AND status = 'Pending'
             ORDER BY created_at DESC
