@@ -95,3 +95,6 @@ Realizzare un’applicazione in RUST, dal titolo Ruggine, di tipo client/server 
 
 //TODO 
 Gestire bene last_seen
+invito non arriva
+input area non c'è
+aggiustare estetica e bugs
