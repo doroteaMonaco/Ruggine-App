@@ -17,6 +17,9 @@ sysinfo = "0.30"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 anyhow = "1.0"
 dotenvy = "0.15"
+eframe = "0.28"
+egui = "0.28"
+tokio-stream = "0.1"
 
 [features]
 default = ["client", "server"]  # Abilita entrambe per default
@@ -30,3 +33,7 @@ path = "src/server/main.rs"
 [[bin]]
 name = "ruggine-client"
 path = "src/client/main.rs"
+
+[[bin]]
+name = "ruggine-gui"
+path = "src/client/gui_app.rs"
