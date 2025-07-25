@@ -98,3 +98,5 @@ Gestire bene last_seen
 invito non arriva
 input area non c'è
 aggiustare estetica e bugs
+fare login
+tegliere messaggi dal db
