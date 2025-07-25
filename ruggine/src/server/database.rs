@@ -553,4 +553,15 @@ impl DatabaseManager {
 
         Ok(())
     }
+
+    /// Reset all users to offline status (useful at server startup)
+    pub async fn reset_all_users_offline(&self) -> Result<()> {
+        sqlx::query("UPDATE users SET is_online = false, last_seen = ?")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        
+        info!("Reset all users to offline status");
+        Ok(())
+    }
 }

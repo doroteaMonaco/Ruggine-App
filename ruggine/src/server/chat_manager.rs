@@ -45,7 +45,37 @@ impl ChatManager {
     pub async fn register_user(&self, username: String, addr: SocketAddr) -> Result<Uuid, String> {
         // Controlla se l'username è già in uso nel database
         match self.db_manager.get_user_by_username(&username).await {
-            Ok(Some(_)) => return Err("Username already taken".to_string()),
+            Ok(Some(existing_user)) => {
+                // Se l'utente esiste ma è offline, può riconnettersi
+                if !existing_user.is_online {
+                    // Aggiorna l'utente come online
+                    if let Err(e) = self.db_manager.update_user_online_status(existing_user.id, true).await {
+                        return Err(format!("Failed to update user online status: {}", e));
+                    }
+                    
+                    // Crea ConnectedUser per la gestione in memoria della connessione
+                    let connected_user = ConnectedUser {
+                        id: existing_user.id,
+                        username: username.clone(),
+                        addr,
+                        connected_at: chrono::Utc::now(),
+                    };
+                    
+                    // Aggiungi ai mapping in memoria per gestione connessioni
+                    {
+                        let mut users = self.users.write().await;
+                        let mut usernames = self.usernames.write().await;
+                        
+                        users.insert(existing_user.id, connected_user);
+                        usernames.insert(username.clone(), existing_user.id);
+                    }
+                    
+                    info!("User reconnected: {} ({})", username, existing_user.id);
+                    return Ok(existing_user.id);
+                } else {
+                    return Err("Username already taken (user is online)".to_string());
+                }
+            },
             Ok(None) => {}, // Username disponibile
             Err(e) => return Err(format!("Database error: {}", e)),
         }
@@ -454,19 +484,28 @@ impl ChatManager {
 
     // === PERFORMANCE & PERSISTENCE ===
     pub async fn get_performance_metrics(&self) -> (usize, usize, usize) {
-        // Recupera statistiche dal database per dati persistenti
+        // Conta solo utenti online dal database
+        let online_users_count = match self.db_manager.get_online_users().await {
+            Ok(online_users) => online_users.len(),
+            Err(e) => {
+                warn!("Failed to get online users from database: {}", e);
+                // Fallback ai dati in memoria (che rappresentano utenti connessi)
+                self.users.read().await.len()
+            }
+        };
+
+        // Recupera statistiche per gruppi e messaggi dal database
         match self.db_manager.get_database_stats().await {
-            Ok((users_db, groups_db, messages_db, _invites)) => {
-                // Usa i dati dal database che sono persistenti
-                (users_db, groups_db, messages_db)
+            Ok((_users_db, groups_db, messages_db, _invites)) => {
+                // Usa il conteggio degli utenti online e i dati dal database per gruppi e messaggi
+                (online_users_count, groups_db, messages_db)
             },
             Err(e) => {
                 warn!("Failed to get database stats, using memory stats: {}", e);
-                // Fallback ai dati in memoria se il database fallisce
-                let user_count = self.users.read().await.len();
+                // Fallback completo ai dati in memoria se il database fallisce
                 let group_count = self.groups.read().await.len();
                 let message_count = self.messages.read().await.len();
-                (user_count, group_count, message_count)
+                (online_users_count, group_count, message_count)
             }
         }
     }

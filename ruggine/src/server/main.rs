@@ -52,6 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_manager = Arc::new(DatabaseManager::new(&config.database_url).await?);
     info!("Database initialized successfully");
     
+    // Reset all users to offline status at server startup
+    if let Err(e) = db_manager.reset_all_users_offline().await {
+        error!("Failed to reset users offline status: {}", e);
+    }
+    
     // Inizializza il chat manager con il database
     let chat_manager = Arc::new(ChatManager::new(Arc::clone(&db_manager)));
     let connection_count = Arc::new(RwLock::new(0usize));
