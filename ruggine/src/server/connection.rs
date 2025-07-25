@@ -379,7 +379,36 @@ impl ClientConnection {
                     }
                 }
                 Err(e) => {
-                    error!("Error reading from {}: {}", addr, e);
+                    // Distingui tra disconnessioni normali e errori veri
+                    let is_normal_disconnect = match e.kind() {
+                        std::io::ErrorKind::ConnectionReset | 
+                        std::io::ErrorKind::ConnectionAborted |
+                        std::io::ErrorKind::BrokenPipe |
+                        std::io::ErrorKind::UnexpectedEof => true,
+                        _ => {
+                            // Controlla se è un errore Windows specifico per disconnessione
+                            #[cfg(windows)]
+                            {
+                                if let Some(os_error) = e.raw_os_error() {
+                                    // 10054 = WSAECONNRESET (connection reset by peer)
+                                    // 10053 = WSAECONNABORTED (connection aborted)
+                                    matches!(os_error, 10054 | 10053)
+                                } else {
+                                    false
+                                }
+                            }
+                            #[cfg(not(windows))]
+                            false
+                        }
+                    };
+
+                    if is_normal_disconnect {
+                        // Client disconnesso normalmente (anche se forzatamente)
+                        debug!("Client {} disconnected: {}", addr, e);
+                    } else {
+                        // Errore vero del server
+                        error!("Error reading from {}: {}", addr, e);
+                    }
                     break;
                 }
             }
