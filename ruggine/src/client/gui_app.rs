@@ -1,6 +1,7 @@
 use eframe::egui;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::time::Duration;
+use uuid::Uuid;
 
 mod network_manager;
 use network_manager::{NetworkManager, NetworkMessage, NetworkCommand};
@@ -10,9 +11,9 @@ fn main() -> Result<(), eframe::Error> {
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 750.0])
-            .with_min_inner_size([800.0, 600.0])
-            .with_title("Ruggine Chat - Modern GUI Client"),
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([900.0, 650.0])
+            .with_title("🦀 Ruggine Chat - Modern Client"),
         ..Default::default()
     };
     
@@ -32,61 +33,132 @@ struct RuggineApp {
     // Connection state
     server_host: String,
     server_port: String,
-    show_connection_dialog: bool,
+    is_connected: bool,
+    connection_status: String,
     
     // User authentication
     username: String,
     is_registered: bool,
+    registration_status: String,
     
     // Chat state
     messages: VecDeque<ChatMessage>,
     input_message: String,
-    current_group: String,
+    current_chat: CurrentChat,
+    
+    // Chat history per group/user
+    chat_histories: HashMap<String, VecDeque<ChatMessage>>,
     
     // User interface state
+    selected_tab: TabType,
     auto_scroll: bool,
-    show_users_sidebar: bool,
-    show_groups_sidebar: bool,
-    show_help_dialog: bool,
-    show_settings_dialog: bool,
     
     // Data collections
     online_users: Vec<String>,
-    my_groups: Vec<String>,
-    available_groups: Vec<String>,
-    pending_invites: Vec<GroupInvite>,
+    my_groups: Vec<GroupInfo>,
+    pending_invites: Vec<InviteInfo>,
     
-    // Group management
+    // Input fields for operations
     new_group_name: String,
     invite_username: String,
     invite_group_name: String,
+    private_message_target: String,
     
-    // UI theme
-    dark_mode: bool,
-    message_font_size: f32,
+    // UI state
+    show_connection_panel: bool,
+    show_registration_panel: bool,
+    show_create_group_dialog: bool,
+    show_invite_dialog: bool,
+    show_settings: bool,
+    
+    // Theme
+    theme: Theme,
+    
+    // Error/success feedback
+    last_feedback: Option<FeedbackMessage>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ChatMessage {
-    text: String,
-    message_type: MessageType,
+    id: String,
+    content: String,
+    sender: String,
     timestamp: String,
+    message_type: ChatMessageType,
 }
 
-#[derive(Clone)]
-enum MessageType {
+#[derive(Clone, Debug)]
+enum ChatMessageType {
     UserMessage,
     SystemInfo,
     SystemError,
-    ServerResponse,
-    GroupMessage { from: String, group: String },
+    GroupMessage,
+    PrivateMessage,
 }
 
-#[derive(Clone)]
-struct GroupInvite {
+#[derive(Clone, Debug)]
+struct GroupInfo {
+    name: String,
+    member_count: usize,
+    unread_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct InviteInfo {
+    id: String,
     from_user: String,
     group_name: String,
     timestamp: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CurrentChat {
+    None,
+    Group(String),
+    Private(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TabType {
+    Chat,
+    Groups,
+    Users,
+    Invites,
+    Settings,
+}
+
+#[derive(Clone)]
+struct FeedbackMessage {
+    text: String,
+    is_error: bool,
+    timestamp: std::time::Instant,
+}
+
+#[derive(Clone)]
+struct Theme {
+    primary_color: egui::Color32,
+    secondary_color: egui::Color32,
+    success_color: egui::Color32,
+    error_color: egui::Color32,
+    background_color: egui::Color32,
+    panel_color: egui::Color32,
+    text_color: egui::Color32,
+    accent_color: egui::Color32,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            primary_color: egui::Color32::from_rgb(70, 130, 200),
+            secondary_color: egui::Color32::from_rgb(100, 160, 220),
+            success_color: egui::Color32::from_rgb(60, 180, 120),
+            error_color: egui::Color32::from_rgb(220, 80, 80),
+            background_color: egui::Color32::from_rgb(240, 242, 245),
+            panel_color: egui::Color32::from_rgb(255, 255, 255),
+            text_color: egui::Color32::from_rgb(50, 50, 50),
+            accent_color: egui::Color32::from_rgb(255, 165, 0),
+        }
+    }
 }
 
 impl RuggineApp {
@@ -95,94 +167,120 @@ impl RuggineApp {
             network: NetworkManager::new(),
             server_host: "127.0.0.1".to_string(),
             server_port: "5000".to_string(),
-            show_connection_dialog: true,
+            is_connected: false,
+            connection_status: "Disconnected".to_string(),
             username: String::new(),
             is_registered: false,
+            registration_status: String::new(),
             messages: VecDeque::new(),
             input_message: String::new(),
-            current_group: String::new(),
+            current_chat: CurrentChat::None,
+            chat_histories: HashMap::new(),
+            selected_tab: TabType::Chat,
             auto_scroll: true,
-            show_users_sidebar: false,
-            show_groups_sidebar: false,
-            show_help_dialog: false,
-            show_settings_dialog: false,
             online_users: Vec::new(),
             my_groups: Vec::new(),
-            available_groups: Vec::new(),
             pending_invites: Vec::new(),
             new_group_name: String::new(),
             invite_username: String::new(),
             invite_group_name: String::new(),
-            dark_mode: true,
-            message_font_size: 14.0,
+            private_message_target: String::new(),
+            show_connection_panel: true,
+            show_registration_panel: false,
+            show_create_group_dialog: false,
+            show_invite_dialog: false,
+            show_settings: false,
+            theme: Theme::default(),
+            last_feedback: None,
         }
     }
     
-    fn add_message(&mut self, text: String, msg_type: MessageType) {
+    fn add_message(&mut self, content: String, sender: String, msg_type: ChatMessageType) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.messages.push_back(ChatMessage {
-            text,
-            message_type: msg_type,
+        let message = ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            content,
+            sender,
             timestamp,
-        });
+            message_type: msg_type,
+        };
         
-        // Keep only last 1000 messages for performance
-        while self.messages.len() > 1000 {
+        // Add to current chat
+        self.messages.push_back(message.clone());
+        
+        // Add to appropriate chat history
+        let chat_key = match &self.current_chat {
+            CurrentChat::Group(name) => format!("group:{}", name),
+            CurrentChat::Private(name) => format!("private:{}", name),
+            CurrentChat::None => "system".to_string(),
+        };
+        
+        self.chat_histories.entry(chat_key.clone()).or_insert_with(VecDeque::new).push_back(message);
+        
+        // Keep only last 500 messages per chat
+        if let Some(history) = self.chat_histories.get_mut(&chat_key) {
+            while history.len() > 500 {
+                history.pop_front();
+            }
+        }
+        
+        // Global messages limit
+        while self.messages.len() > 500 {
             self.messages.pop_front();
         }
+    }
+    
+    fn set_feedback(&mut self, text: String, is_error: bool) {
+        self.last_feedback = Some(FeedbackMessage {
+            text,
+            is_error,
+            timestamp: std::time::Instant::now(),
+        });
     }
     
     fn send_command(&self, command: &str) {
         self.network.send_command(NetworkCommand::SendMessage(command.to_string()));
     }
     
-    fn connect_to_server(&self) {
+    fn connect_to_server(&mut self) {
         let port = self.server_port.parse::<u16>().unwrap_or(5000);
         self.network.send_command(NetworkCommand::Connect(self.server_host.clone(), port));
+        self.connection_status = "Connecting...".to_string();
     }
     
-    fn disconnect_from_server(&self) {
+    fn disconnect_from_server(&mut self) {
         self.network.send_command(NetworkCommand::Disconnect);
+        self.is_connected = false;
+        self.is_registered = false;
+        self.connection_status = "Disconnected".to_string();
+        self.show_connection_panel = true;
+        self.show_registration_panel = false;
     }
     
-    fn parse_server_response(&mut self, response: &str) {
-        if response.starts_with("OK:") {
-            let message = &response[3..].trim();
-            self.add_message(format!("✅ {}", message), MessageType::SystemInfo);
-            
-            // Handle specific successful responses
-            if message.contains("registered") {
-                self.is_registered = true;
-            } else if message.contains("Online users:") {
-                if let Some(users_part) = message.split(':').nth(1) {
-                    self.online_users = users_part
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty() && s != &self.username)
-                        .collect();
-                }
-            } else if message.contains("Your groups:") {
-                if let Some(groups_part) = message.split(':').nth(1) {
-                    self.my_groups = groups_part
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            } else if message.contains("Joined group") {
-                if let Some(group_name) = message.split('\'').nth(1) {
-                    self.current_group = group_name.to_string();
-                }
-            }
-        } else if response.starts_with("ERROR:") {
-            let error_msg = &response[6..].trim();
-            self.add_message(format!("❌ {}", error_msg), MessageType::SystemError);
-        } else if response.contains("[") && response.contains("]") {
-            // Group message format: [GroupName] User: Message
-            self.add_message(response.to_string(), MessageType::ServerResponse);
-        } else {
-            // General server response
-            self.add_message(response.to_string(), MessageType::ServerResponse);
+    fn register_user(&mut self) {
+        if !self.username.trim().is_empty() {
+            let command = format!("/register {}", self.username.trim());
+            self.send_command(&command);
+            self.registration_status = "Registering...".to_string();
+        }
+    }
+    
+    fn create_group(&mut self) {
+        if !self.new_group_name.trim().is_empty() {
+            let command = format!("/create_group {}", self.new_group_name.trim());
+            self.send_command(&command);
+            self.new_group_name.clear();
+            self.show_create_group_dialog = false;
+        }
+    }
+    
+    fn invite_user_to_group(&mut self) {
+        if !self.invite_username.trim().is_empty() && !self.invite_group_name.trim().is_empty() {
+            let command = format!("/invite {} {}", self.invite_username.trim(), self.invite_group_name.trim());
+            self.send_command(&command);
+            self.invite_username.clear();
+            self.invite_group_name.clear();
+            self.show_invite_dialog = false;
         }
     }
     
@@ -193,75 +291,179 @@ impl RuggineApp {
         
         let message = self.input_message.trim().to_string();
         
-        if message.starts_with('/') {
-            // Command - first add to local display, then send
-            self.add_message(format!("💻 Command: {}", message), MessageType::UserMessage);
-            self.network.send_command(NetworkCommand::SendMessage(message));
-        } else if !self.current_group.is_empty() {
-            // Group message - prepare command and display message
-            let current_group = self.current_group.clone(); // Clone to avoid borrow issues
-            let full_command = format!("/msg {} {}", current_group, message);
-            
-            self.add_message(format!("💬 You to [{}]: {}", current_group, message), MessageType::UserMessage);
-            self.network.send_command(NetworkCommand::SendMessage(full_command));
-        } else {
-            self.add_message("⚠️ Please join a group first or use a command (starting with /)".to_string(), MessageType::SystemError);
+        match &self.current_chat {
+            CurrentChat::Group(group_name) => {
+                let command = format!("/send {} {}", group_name, message);
+                self.send_command(&command);
+            }
+            CurrentChat::Private(username) => {
+                let command = format!("/send_private {} {}", username, message);
+                self.send_command(&command);
+            }
+            CurrentChat::None => {
+                self.set_feedback("Please select a group or user to chat with".to_string(), true);
+                return;
+            }
         }
+        
+        // Add message to chat immediately for better UX
+        self.add_message(
+            message,
+            self.username.clone(),
+            match &self.current_chat {
+                CurrentChat::Group(_) => ChatMessageType::GroupMessage,
+                CurrentChat::Private(_) => ChatMessageType::PrivateMessage,
+                CurrentChat::None => ChatMessageType::UserMessage,
+            }
+        );
         
         self.input_message.clear();
     }
-}
-
-impl eframe::App for RuggineApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Apply theme
-        if self.dark_mode {
-            ctx.set_visuals(egui::Visuals::dark());
+    
+    fn switch_to_group(&mut self, group_name: String) {
+        self.current_chat = CurrentChat::Group(group_name.clone());
+        self.load_chat_history(&format!("group:{}", group_name));
+    }
+    
+    fn switch_to_private(&mut self, username: String) {
+        self.current_chat = CurrentChat::Private(username.clone());
+        self.load_chat_history(&format!("private:{}", username));
+    }
+    
+    fn load_chat_history(&mut self, chat_key: &str) {
+        if let Some(history) = self.chat_histories.get(chat_key) {
+            self.messages = history.clone();
         } else {
-            ctx.set_visuals(egui::Visuals::light());
+            self.messages.clear();
         }
-        
-        // Handle network messages
+    }
+    
+    fn process_network_messages(&mut self) {
         let messages = self.network.get_messages();
-        for msg in messages {
-            match msg {
+        for message in messages {
+            match message {
                 NetworkMessage::Connected => {
-                    self.show_connection_dialog = false;
-                    self.add_message("🟢 Connected to Ruggine server!".to_string(), MessageType::SystemInfo);
+                    self.is_connected = true;
+                    self.connection_status = "Connected".to_string();
+                    self.show_connection_panel = false;
+                    self.show_registration_panel = true;
+                    self.set_feedback("Connected to server!".to_string(), false);
                 }
                 NetworkMessage::Disconnected => {
-                    self.show_connection_dialog = true;
+                    self.is_connected = false;
                     self.is_registered = false;
-                    self.current_group.clear();
-                    self.add_message("🔴 Disconnected from server".to_string(), MessageType::SystemError);
+                    self.connection_status = "Disconnected".to_string();
+                    self.show_connection_panel = true;
+                    self.show_registration_panel = false;
+                    self.set_feedback("Disconnected from server".to_string(), true);
                 }
                 NetworkMessage::ServerResponse(response) => {
                     self.parse_server_response(&response);
                 }
                 NetworkMessage::Error(error) => {
-                    self.add_message(format!("💥 Network Error: {}", error), MessageType::SystemError);
+                    self.set_feedback(format!("Network error: {}", error), true);
                 }
             }
         }
+    }
+    
+    fn parse_server_response(&mut self, response: &str) {
+        if response.starts_with("OK:") {
+            let message = response[3..].trim();
+            
+            if message.contains("Registered as:") {
+                self.is_registered = true;
+                self.show_registration_panel = false;
+                self.registration_status = "Registered!".to_string();
+                self.set_feedback("Successfully registered!".to_string(), false);
+                
+                // Auto-fetch initial data
+                self.send_command("/users");
+                self.send_command("/my_groups");
+                self.send_command("/my_invites");
+            } else if message.contains("Online users:") {
+                self.parse_users_list(message);
+            } else if message.contains("Your groups:") {
+                self.parse_groups_list(message);
+            } else if message.contains("Group") && message.contains("created") {
+                self.send_command("/my_groups"); // Refresh groups
+                self.set_feedback("Group created successfully!".to_string(), false);
+            } else if message.contains("sent to") {
+                self.set_feedback("Message sent!".to_string(), false);
+            } else if message.contains("Invitation sent") {
+                self.set_feedback("Invitation sent!".to_string(), false);
+            }
+            
+            self.add_message(message.to_string(), "System".to_string(), ChatMessageType::SystemInfo);
+        } else if response.starts_with("ERROR:") {
+            let error = response[6..].trim();
+            self.set_feedback(format!("Error: {}", error), true);
+            self.add_message(error.to_string(), "System".to_string(), ChatMessageType::SystemError);
+        }
+    }
+    
+    fn parse_users_list(&mut self, message: &str) {
+        if let Some(users_part) = message.strip_prefix("Online users: ") {
+            self.online_users = users_part.split(", ")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != &self.username)
+                .collect();
+        }
+    }
+    
+    fn parse_groups_list(&mut self, message: &str) {
+        if let Some(groups_part) = message.strip_prefix("Your groups: ") {
+            self.my_groups = groups_part.split(", ")
+                .map(|s| GroupInfo {
+                    name: s.trim().to_string(),
+                    member_count: 0, // TODO: get actual member count
+                    unread_count: 0,
+                })
+                .filter(|g| !g.name.is_empty())
+                .collect();
+        }
+    }
+}
+
+impl eframe::App for RuggineApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Process network messages
+        self.process_network_messages();
         
-        // Request regular repaints for real-time updates
+        // Remove expired feedback
+        if let Some(ref feedback) = self.last_feedback {
+            if feedback.timestamp.elapsed() > Duration::from_secs(5) {
+                self.last_feedback = None;
+            }
+        }
+        
+        // Request regular repaints
         ctx.request_repaint_after(Duration::from_millis(100));
         
-        // Connection dialog
-        if self.show_connection_dialog {
+        // Show appropriate UI based on connection state
+        if self.show_connection_panel {
             self.show_connection_ui(ctx);
             return;
         }
         
-        // Main UI
+        if self.show_registration_panel {
+            self.show_registration_ui(ctx);
+            return;
+        }
+        
+        // Main chat UI
         self.show_main_ui(ctx);
         
         // Dialogs
-        if self.show_help_dialog {
-            self.show_help_ui(ctx);
+        if self.show_create_group_dialog {
+            self.show_create_group_dialog_ui(ctx);
         }
         
-        if self.show_settings_dialog {
+        if self.show_invite_dialog {
+            self.show_invite_dialog_ui(ctx);
+        }
+        
+        if self.show_settings {
             self.show_settings_ui(ctx);
         }
     }
@@ -271,395 +473,488 @@ impl RuggineApp {
     fn show_connection_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
+                ui.add_space(150.0);
                 
-                ui.heading("🦀 Welcome to Ruggine Chat");
-                ui.add_space(20.0);
-                
-                ui.label("Connect to your Ruggine server to start chatting");
-                ui.add_space(30.0);
-                
-                egui::Grid::new("connection_grid")
-                    .num_columns(2)
-                    .spacing([10.0, 10.0])
-                    .show(ui, |ui| {
-                        ui.label("Server Address:");
-                        ui.text_edit_singleline(&mut self.server_host);
-                        ui.end_row();
-                        
-                        ui.label("Port:");
-                        ui.text_edit_singleline(&mut self.server_port);
-                        ui.end_row();
-                    });
-                
-                ui.add_space(20.0);
-                
-                if ui.button("🔗 Connect to Server").clicked() {
-                    self.connect_to_server();
-                }
+                // Title with custom styling
+                ui.style_mut().text_styles.get_mut(&egui::TextStyle::Heading).unwrap().size = 32.0;
+                ui.colored_label(self.theme.primary_color, "🦀 Ruggine Chat");
                 
                 ui.add_space(10.0);
-                ui.small("Default: 127.0.0.1:5000");
+                ui.label("Modern Chat Client");
+                ui.add_space(40.0);
                 
-                ui.add_space(50.0);
-                
-                if !self.network.is_connected() {
-                    ui.horizontal(|ui| {
-                        if ui.button("❓ Help").clicked() {
-                            self.show_help_dialog = true;
-                        }
-                        if ui.button("⚙️ Settings").clicked() {
-                            self.show_settings_dialog = true;
-                        }
+                // Connection form in a styled frame
+                egui::Frame::none()
+                    .fill(self.theme.panel_color)
+                    .rounding(10.0)
+                    .inner_margin(20.0)
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label("Connect to Server");
+                            ui.add_space(15.0);
+                            
+                            egui::Grid::new("connection_grid")
+                                .num_columns(2)
+                                .spacing([15.0, 10.0])
+                                .show(ui, |ui| {
+                                    ui.label("🌐 Host:");
+                                    ui.text_edit_singleline(&mut self.server_host);
+                                    ui.end_row();
+                                    
+                                    ui.label("🔌 Port:");
+                                    ui.text_edit_singleline(&mut self.server_port);
+                                    ui.end_row();
+                                });
+                            
+                            ui.add_space(20.0);
+                            
+                            if ui.add_sized([200.0, 35.0], egui::Button::new("🚀 Connect")
+                                .fill(self.theme.primary_color)).clicked() {
+                                self.connect_to_server();
+                            }
+                            
+                            ui.add_space(10.0);
+                            ui.label(&self.connection_status);
+                        });
                     });
-                }
+            });
+        });
+    }
+    
+    fn show_registration_ui(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(200.0);
+                
+                ui.heading("Welcome to Ruggine Chat!");
+                ui.add_space(10.0);
+                ui.label("Please choose a username to continue");
+                ui.add_space(30.0);
+                
+                egui::Frame::none()
+                    .fill(self.theme.panel_color)
+                    .rounding(10.0)
+                    .inner_margin(20.0)
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label("👤 Username");
+                            ui.add_space(10.0);
+                            
+                            let response = ui.add_sized([250.0, 30.0], egui::TextEdit::singleline(&mut self.username)
+                                .hint_text("Enter your username..."));
+                            
+                            ui.add_space(15.0);
+                            
+                            let register_btn = ui.add_sized([200.0, 35.0], egui::Button::new("📝 Register")
+                                .fill(self.theme.success_color));
+                            
+                            if (register_btn.clicked() || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) 
+                                && !self.username.trim().is_empty() {
+                                self.register_user();
+                            }
+                            
+                            ui.add_space(10.0);
+                            ui.label(&self.registration_status);
+                        });
+                    });
             });
         });
     }
     
     fn show_main_ui(&mut self, ctx: &egui::Context) {
-        // Top menu bar
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("🔌 Connection", |ui| {
-                    if ui.button("📊 Server Status").clicked() {
-                        // Could show ping, connection info, etc.
-                    }
-                    ui.separator();
-                    if ui.button("🔌 Disconnect").clicked() {
-                        self.disconnect_from_server();
-                    }
-                });
+        // Top bar
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 15.0;
                 
-                ui.menu_button("👤 Account", |ui| {
-                    if !self.is_registered {
-                        if ui.button("📝 Register").clicked() && !self.username.is_empty() {
-                            self.send_command(&format!("/register {}", self.username));
-                        }
-                    }
-                    if ui.button("👥 Show Online Users").clicked() {
-                        self.send_command("/users");
-                        self.show_users_sidebar = true;
-                    }
-                });
-                
-                ui.menu_button("🏠 Groups", |ui| {
-                    if ui.button("📋 My Groups").clicked() {
-                        self.send_command("/my_groups");
-                        self.show_groups_sidebar = true;
-                    }
-                    if ui.button("➕ Create Group").clicked() && !self.new_group_name.is_empty() {
-                        self.send_command(&format!("/create_group {}", self.new_group_name));
-                        self.new_group_name.clear();
-                    }
-                });
-                
-                ui.menu_button("🔧 View", |ui| {
-                    ui.checkbox(&mut self.show_users_sidebar, "👥 Users Panel");
-                    ui.checkbox(&mut self.show_groups_sidebar, "🏠 Groups Panel");
-                    ui.separator();
-                    ui.checkbox(&mut self.auto_scroll, "📜 Auto Scroll");
-                    if ui.button("🗑️ Clear Messages").clicked() {
-                        self.messages.clear();
-                    }
-                });
-                
-                ui.menu_button("❓ Help", |ui| {
-                    if ui.button("📚 Commands").clicked() {
-                        self.show_help_dialog = true;
-                    }
-                    if ui.button("⚙️ Settings").clicked() {
-                        self.show_settings_dialog = true;
-                    }
-                });
-                
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Connection status
-                    if self.network.is_connected() {
-                        ui.colored_label(egui::Color32::GREEN, "🟢 Connected");
-                    } else {
-                        ui.colored_label(egui::Color32::RED, "🔴 Disconnected");
-                    }
-                    
-                    // Current group
-                    if !self.current_group.is_empty() {
-                        ui.separator();
-                        ui.label(format!("🏠 {}", self.current_group));
-                    }
-                    
-                    // Username
-                    if self.is_registered {
-                        ui.separator();
-                        ui.label(format!("👤 {}", self.username));
-                    }
-                });
-            });
-        });
-        
-        // Users sidebar
-        if self.show_users_sidebar {
-            egui::SidePanel::right("users_panel").default_width(220.0).show(ctx, |ui| {
-                ui.heading("👥 Online Users");
+                // Logo and title
+                ui.colored_label(self.theme.primary_color, "🦀 Ruggine");
                 ui.separator();
                 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.online_users.is_empty() {
-                        ui.label("No other users online");
-                    } else {
-                        for user in &self.online_users.clone() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("👤 {}", user));
-                                if ui.small_button("💌").on_hover_text("Invite to group").clicked() {
-                                    self.invite_username = user.clone();
-                                }
-                            });
-                        }
-                    }
-                });
-                
-                ui.separator();
-                if ui.button("🔄 Refresh").clicked() {
+                // Tab buttons
+                if ui.selectable_label(self.selected_tab == TabType::Chat, "💬 Chat").clicked() {
+                    self.selected_tab = TabType::Chat;
+                }
+                if ui.selectable_label(self.selected_tab == TabType::Groups, "🏠 Groups").clicked() {
+                    self.selected_tab = TabType::Groups;
+                }
+                if ui.selectable_label(self.selected_tab == TabType::Users, "👥 Users").clicked() {
+                    self.selected_tab = TabType::Users;
                     self.send_command("/users");
                 }
-                if ui.button("❌ Close").clicked() {
-                    self.show_users_sidebar = false;
+                if ui.selectable_label(self.selected_tab == TabType::Invites, "📨 Invites").clicked() {
+                    self.selected_tab = TabType::Invites;
+                    self.send_command("/my_invites");
                 }
-            });
-        }
-        
-        // Groups sidebar
-        if self.show_groups_sidebar {
-            egui::SidePanel::left("groups_panel").default_width(280.0).show(ctx, |ui| {
-                ui.heading("🏠 Group Management");
-                ui.separator();
                 
-                // My Groups section
-                ui.label("📋 My Groups:");
-                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-                    if self.my_groups.is_empty() {
-                        ui.label("No groups yet");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Settings button
+                    if ui.button("⚙️").clicked() {
+                        self.show_settings = true;
+                    }
+                    
+                    // Connection status
+                    if self.is_connected {
+                        ui.colored_label(self.theme.success_color, "🟢 Connected");
                     } else {
-                        for group in &self.my_groups.clone() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("🏠 {}", group));
-                                if ui.small_button("🚪").on_hover_text("Join group").clicked() {
-                                    self.send_command(&format!("/join_group {}", group));
-                                }
-                                if ui.small_button("🚶").on_hover_text("Leave group").clicked() {
-                                    self.send_command(&format!("/leave_group {}", group));
-                                    if self.current_group == *group {
-                                        self.current_group.clear();
-                                    }
-                                }
-                            });
-                        }
-                    }
-                });
-                
-                ui.separator();
-                
-                // Create new group
-                ui.label("➕ Create New Group:");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.new_group_name);
-                    if ui.button("Create").clicked() && !self.new_group_name.trim().is_empty() {
-                        self.send_command(&format!("/create_group {}", self.new_group_name.trim()));
-                        self.new_group_name.clear();
-                    }
-                });
-                
-                ui.separator();
-                
-                // Invite user to group
-                ui.label("📧 Invite User:");
-                egui::Grid::new("invite_grid").show(ui, |ui| {
-                    ui.label("Username:");
-                    ui.text_edit_singleline(&mut self.invite_username);
-                    ui.end_row();
-                    
-                    ui.label("Group:");
-                    ui.text_edit_singleline(&mut self.invite_group_name);
-                    ui.end_row();
-                });
-                
-                if ui.button("📤 Send Invite").clicked() 
-                    && !self.invite_username.trim().is_empty() 
-                    && !self.invite_group_name.trim().is_empty() {
-                    self.send_command(&format!("/invite {} {}", 
-                        self.invite_username.trim(), 
-                        self.invite_group_name.trim()));
-                    self.invite_username.clear();
-                    self.invite_group_name.clear();
-                }
-                
-                ui.separator();
-                
-                ui.horizontal(|ui| {
-                    if ui.button("🔄 Refresh").clicked() {
-                        self.send_command("/my_groups");
-                    }
-                    if ui.button("❌ Close").clicked() {
-                        self.show_groups_sidebar = false;
-                    }
-                });
-            });
-        }
-        
-        // Bottom input panel
-        egui::TopBottomPanel::bottom("input_panel").show(ctx, |ui| {
-            if !self.is_registered {
-                // Registration UI
-                ui.horizontal(|ui| {
-                    ui.label("👤 Choose username:");
-                    ui.text_edit_singleline(&mut self.username);
-                    if ui.button("📝 Register").clicked() && !self.username.trim().is_empty() {
-                        self.send_command(&format!("/register {}", self.username.trim()));
-                    }
-                });
-                ui.small("Register first to start using the chat");
-            } else {
-                // Message input UI
-                ui.horizontal(|ui| {
-                    ui.label("💬");
-                    let response = ui.text_edit_singleline(&mut self.input_message);
-                    
-                    // Send on Enter
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.send_message();
-                    }
-                    
-                    if ui.button("📤 Send").clicked() {
-                        self.send_message();
+                        ui.colored_label(self.theme.error_color, "🔴 Disconnected");
                     }
                     
                     ui.separator();
                     
-                    // Quick actions
-                    if ui.small_button("👥").on_hover_text("Show users").clicked() {
-                        self.send_command("/users");
-                        self.show_users_sidebar = true;
-                    }
-                    if ui.small_button("🏠").on_hover_text("Show groups").clicked() {
-                        self.send_command("/my_groups");
-                        self.show_groups_sidebar = true;
-                    }
-                });
-                
-                if !self.current_group.is_empty() {
-                    ui.small(format!("📍 Sending to group: {}", self.current_group));
-                } else {
-                    ui.small("💡 Join a group to send messages, or use commands starting with /");
-                }
-            }
-        });
-        
-        // Central message area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("💬 Chat Messages");
-            ui.separator();
-            
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(self.auto_scroll)
-                .show(ui, |ui| {
-                    if self.messages.is_empty() {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("Welcome to Ruggine Chat! 🦀\n\nRegister and join a group to start chatting.\nUse the sidebar panels to manage users and groups.");
-                        });
-                    } else {
-                        for msg in &self.messages {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("[{}]", msg.timestamp));
-                                
-                                let (color, icon) = match &msg.message_type {
-                                    MessageType::UserMessage => (ui.style().visuals.text_color(), "💬"),
-                                    MessageType::SystemInfo => (egui::Color32::LIGHT_BLUE, "ℹ️"),
-                                    MessageType::SystemError => (egui::Color32::LIGHT_RED, "⚠️"),
-                                    MessageType::ServerResponse => (egui::Color32::LIGHT_GREEN, "📢"),
-                                    MessageType::GroupMessage { from: _, group: _ } => (egui::Color32::YELLOW, "👥"),
-                                };
-                                
-                                ui.label(icon);
-                                ui.colored_label(color, &msg.text);
-                            });
+                    // Current chat info
+                    match &self.current_chat {
+                        CurrentChat::Group(name) => {
+                            ui.label(format!("🏠 {}", name));
+                        }
+                        CurrentChat::Private(name) => {
+                            ui.label(format!("💬 {}", name));
+                        }
+                        CurrentChat::None => {
+                            ui.label("💭 No chat selected");
                         }
                     }
+                    
+                    ui.separator();
+                    ui.label(format!("👤 {}", self.username));
                 });
+            });
+        });
+        
+        // Show feedback message
+        if let Some(ref feedback) = self.last_feedback {
+            egui::TopBottomPanel::top("feedback").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let color = if feedback.is_error { 
+                        self.theme.error_color 
+                    } else { 
+                        self.theme.success_color 
+                    };
+                    
+                    let icon = if feedback.is_error { "❌" } else { "✅" };
+                    ui.colored_label(color, format!("{} {}", icon, feedback.text));
+                });
+            });
+        }
+        
+        // Main content area
+        egui::CentralPanel::default().show(ctx, |ui| {
+            match self.selected_tab {
+                TabType::Chat => self.show_chat_tab(ui),
+                TabType::Groups => self.show_groups_tab(ui),
+                TabType::Users => self.show_users_tab(ui),
+                TabType::Invites => self.show_invites_tab(ui),
+                TabType::Settings => self.show_settings_tab(ui),
+            }
         });
     }
     
-    fn show_help_ui(&mut self, ctx: &egui::Context) {
-        egui::Window::new("❓ Ruggine Chat Help")
-            .resizable(true)
-            .default_width(500.0)
-            .max_width(600.0)
-            .show(ctx, |ui| {
-                ui.heading("📚 Available Commands");
-                ui.separator();
-                
-                ui.label("🔹 /register <username> - Register with a username");
-                ui.label("🔹 /users - Show all online users");
-                ui.label("🔹 /create_group <name> - Create a new group");
-                ui.label("🔹 /my_groups - Show your groups");
-                ui.label("🔹 /join_group <name> - Join a group");
-                ui.label("🔹 /leave_group <name> - Leave a group");
-                ui.label("🔹 /invite <user> <group> - Invite user to group");
-                ui.label("🔹 /msg <group> <message> - Send message to group");
-                ui.label("🔹 /quit - Disconnect from server");
-                
-                ui.separator();
-                ui.heading("💡 Tips & Tricks");
-                ui.label("• Use the sidebar panels for easy group and user management");
-                ui.label("• Join a group to send messages without typing commands");
-                ui.label("• Press Enter in the message box to send quickly");
-                ui.label("• Use the menu bar for quick access to features");
-                ui.label("• Toggle auto-scroll in the View menu");
-                
-                ui.separator();
-                ui.heading("🎨 Interface Guide");
-                ui.label("💬 Blue messages = System information");
-                ui.label("⚠️ Red messages = Errors");
-                ui.label("📢 Green messages = Server responses");
-                ui.label("👥 Yellow messages = Group messages");
-                
-                ui.separator();
-                if ui.button("❌ Close Help").clicked() {
-                    self.show_help_dialog = false;
+    fn show_chat_tab(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            // Chat header
+            ui.horizontal(|ui| {
+                match &self.current_chat {
+                    CurrentChat::Group(name) => {
+                        ui.label(format!("🏠 Group: {}", name));
+                        if ui.button("🚪 Leave").clicked() {
+                            let command = format!("/leave_group {}", name);
+                            self.send_command(&command);
+                        }
+                    }
+                    CurrentChat::Private(name) => {
+                        ui.label(format!("💬 Private chat with: {}", name));
+                    }
+                    CurrentChat::None => {
+                        ui.label("💭 Select a group or user to start chatting");
+                    }
                 }
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄").clicked() {
+                        self.send_command("/my_groups");
+                        self.send_command("/users");
+                    }
+                });
+            });
+            
+            ui.separator();
+            
+            // Messages area
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .stick_to_bottom(self.auto_scroll)
+                .show(ui, |ui| {
+                    for message in &self.messages {
+                        self.show_message(ui, message);
+                    }
+                });
+            
+            ui.separator();
+            
+            // Message input area
+            ui.horizontal(|ui| {
+                let input_response = ui.add_sized(
+                    [ui.available_width() - 80.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.input_message)
+                        .hint_text("Type your message...")
+                );
+                
+                if ui.add_sized([70.0, 30.0], egui::Button::new("📤 Send")
+                    .fill(self.theme.primary_color)).clicked() 
+                    || (input_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    self.send_message();
+                }
+            });
+        });
+    }
+    
+    fn show_groups_tab(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading("🏠 Your Groups");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("➕ Create Group").clicked() {
+                        self.show_create_group_dialog = true;
+                    }
+                    if ui.button("👋 Invite User").clicked() {
+                        self.show_invite_dialog = true;
+                    }
+                    if ui.button("🔄 Refresh").clicked() {
+                        self.send_command("/my_groups");
+                    }
+                });
+            });
+            
+            ui.separator();
+            
+            if self.my_groups.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.label("No groups yet");
+                    ui.label("Create a group or wait for an invitation!");
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for group in &self.my_groups.clone() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("🏠 {}", group.name));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("💬 Chat").clicked() {
+                                        self.switch_to_group(group.name.clone());
+                                        self.selected_tab = TabType::Chat;
+                                    }
+                                    if ui.button("🚪 Leave").clicked() {
+                                        let command = format!("/leave_group {}", group.name);
+                                        self.send_command(&command);
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(5.0);
+                    }
+                });
+            }
+        });
+    }
+    
+    fn show_users_tab(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading("👥 Online Users");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄 Refresh").clicked() {
+                        self.send_command("/users");
+                    }
+                });
+            });
+            
+            ui.separator();
+            
+            if self.online_users.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.label("No other users online");
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for user in &self.online_users.clone() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("👤 {}", user));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("💬 Chat").clicked() {
+                                        self.switch_to_private(user.clone());
+                                        self.selected_tab = TabType::Chat;
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(5.0);
+                    }
+                });
+            }
+        });
+    }
+    
+    fn show_invites_tab(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading("📨 Pending Invites");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄 Refresh").clicked() {
+                        self.send_command("/my_invites");
+                    }
+                });
+            });
+            
+            ui.separator();
+            
+            if self.pending_invites.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.label("No pending invites");
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for invite in &self.pending_invites.clone() {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(format!("From: 👤 {}", invite.from_user));
+                                ui.label(format!("Group: 🏠 {}", invite.group_name));
+                                ui.label(format!("Time: 🕐 {}", invite.timestamp));
+                                
+                                ui.horizontal(|ui| {
+                                    if ui.button("✅ Accept").clicked() {
+                                        let command = format!("/accept_invite {}", invite.id);
+                                        self.send_command(&command);
+                                    }
+                                    if ui.button("❌ Reject").clicked() {
+                                        let command = format!("/reject_invite {}", invite.id);
+                                        self.send_command(&command);
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(10.0);
+                    }
+                });
+            }
+        });
+    }
+    
+    fn show_settings_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("⚙️ Settings");
+        ui.separator();
+        
+        ui.checkbox(&mut self.auto_scroll, "📜 Auto-scroll chat");
+        
+        if ui.button("🔌 Disconnect").clicked() {
+            self.disconnect_from_server();
+        }
+    }
+    
+    fn show_message(&self, ui: &mut egui::Ui, message: &ChatMessage) {
+        ui.horizontal(|ui| {
+            ui.label(format!("[{}]", message.timestamp));
+            
+            match &message.message_type {
+                ChatMessageType::UserMessage => {
+                    ui.colored_label(self.theme.primary_color, format!("👤 {}:", message.sender));
+                }
+                ChatMessageType::SystemInfo => {
+                    ui.colored_label(self.theme.success_color, "ℹ️ System:");
+                }
+                ChatMessageType::SystemError => {
+                    ui.colored_label(self.theme.error_color, "❌ Error:");
+                }
+                ChatMessageType::GroupMessage => {
+                    ui.colored_label(self.theme.accent_color, format!("🏠 {}:", message.sender));
+                }
+                ChatMessageType::PrivateMessage => {
+                    ui.colored_label(self.theme.secondary_color, format!("💬 {}:", message.sender));
+                }
+            }
+            
+            ui.label(&message.content);
+        });
+    }
+    
+    fn show_create_group_dialog_ui(&mut self, ctx: &egui::Context) {
+        egui::Window::new("➕ Create New Group")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label("Enter group name:");
+                    ui.text_edit_singleline(&mut self.new_group_name);
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("✅ Create").clicked() {
+                            self.create_group();
+                        }
+                        if ui.button("❌ Cancel").clicked() {
+                            self.show_create_group_dialog = false;
+                            self.new_group_name.clear();
+                        }
+                    });
+                });
+            });
+    }
+    
+    fn show_invite_dialog_ui(&mut self, ctx: &egui::Context) {
+        egui::Window::new("👋 Invite User to Group")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label("Username:");
+                    ui.text_edit_singleline(&mut self.invite_username);
+                    
+                    ui.label("Group name:");
+                    ui.text_edit_singleline(&mut self.invite_group_name);
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("📤 Send Invite").clicked() {
+                            self.invite_user_to_group();
+                        }
+                        if ui.button("❌ Cancel").clicked() {
+                            self.show_invite_dialog = false;
+                            self.invite_username.clear();
+                            self.invite_group_name.clear();
+                        }
+                    });
+                });
             });
     }
     
     fn show_settings_ui(&mut self, ctx: &egui::Context) {
         egui::Window::new("⚙️ Settings")
-            .resizable(false)
-            .default_width(300.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.heading("🎨 Appearance");
-                ui.separator();
-                
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    if ui.radio(self.dark_mode, "🌙 Dark").clicked() {
-                        self.dark_mode = true;
+                ui.vertical(|ui| {
+                    ui.heading("App Settings");
+                    ui.separator();
+                    
+                    ui.checkbox(&mut self.auto_scroll, "📜 Auto-scroll messages");
+                    
+                    ui.add_space(10.0);
+                    
+                    if ui.button("🔌 Disconnect from Server").clicked() {
+                        self.disconnect_from_server();
+                        self.show_settings = false;
                     }
-                    if ui.radio(!self.dark_mode, "☀️ Light").clicked() {
-                        self.dark_mode = false;
+                    
+                    ui.add_space(10.0);
+                    
+                    if ui.button("❌ Close").clicked() {
+                        self.show_settings = false;
                     }
                 });
-                
-                ui.horizontal(|ui| {
-                    ui.label("Font Size:");
-                    ui.add(egui::Slider::new(&mut self.message_font_size, 10.0..=20.0).suffix("px"));
-                });
-                
-                ui.separator();
-                ui.heading("🔧 Behavior");
-                ui.checkbox(&mut self.auto_scroll, "Auto-scroll messages");
-                
-                ui.separator();
-                if ui.button("❌ Close Settings").clicked() {
-                    self.show_settings_dialog = false;
-                }
             });
     }
 }
