@@ -23,7 +23,7 @@ impl ClientConfig {
             .unwrap_or(5000);
         
         let public_host = env::var("CLIENT_PUBLIC_HOST")
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
+            .unwrap_or_else(|_| "95.234.28.229".to_string());
         
         let config = ClientConfig {
             default_host,

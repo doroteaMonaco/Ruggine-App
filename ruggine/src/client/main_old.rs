@@ -1,4 +1,3 @@
-mod network;
 mod ui;
 mod config;
 
