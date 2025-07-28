@@ -98,5 +98,7 @@ Gestire bene last_seen
 input area non c'è
 aggiustare estetica e bugs
 fare login
-tegliere messaggi dal db
-inviti by_username nel server
+trigger per messaggi effimeri
+richieste di amicizia
+solo admin può inviare inviti
+correggere la ricerca del group id 

@@ -6,19 +6,19 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-crossterm = "0.27"
 sysinfo = "0.30"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 anyhow = "1.0"
 dotenvy = "0.15"
-tokio-stream = "0.1"
 iced = { version = "0.12", features = ["tokio", "debug"] }
+ring = "0.17"
+base64 = "0.22"
+rand = "0.8"
 
 [features]
 default = ["client", "server"]  # Abilita entrambe per default

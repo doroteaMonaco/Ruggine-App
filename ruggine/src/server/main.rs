@@ -1,14 +1,6 @@
-mod chat_manager;
-mod connection;
-mod database;
-mod config;
-
-// Importiamo i moduli comuni
-#[path = "../common/mod.rs"]
-mod common;
-
-#[path = "../utils/mod.rs"]
-mod utils;
+// Importiamo i moduli comuni dalla libreria
+use ruggine::server::{ChatManager, DatabaseManager, Config, ClientConnection};
+use ruggine::utils::RuggineLogger;
 
 use clap::Parser;
 use log::{info, warn, error};
@@ -16,10 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use connection::ClientConnection;
-use chat_manager::ChatManager;
-use database::DatabaseManager;
-use config::Config;
 
 #[derive(Parser, Debug)]
 #[command(name = "ruggine-server")]

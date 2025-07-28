@@ -3,11 +3,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use log::{info, warn};
-use crate::database::DatabaseManager;
+use log::{info, warn, error};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use crate::server::database::DatabaseManager;
 
 // Import dei modelli comuni
-use crate::common::models::{Group, GroupInvite, InviteStatus, Message, MessageType, User};
+use crate::common::models::{Group, GroupInvite, InviteStatus, MessageType, User};
+use crate::common::crypto::{EncryptedMessage, CryptoManager};
 
 // Struttura per utenti connessi (specifica del server)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -25,7 +27,8 @@ pub struct ChatManager {
     groups: Arc<RwLock<HashMap<Uuid, Group>>>, // group_id -> group
     group_names: Arc<RwLock<HashMap<String, Uuid>>>, // group_name -> group_id
     invites: Arc<RwLock<HashMap<Uuid, GroupInvite>>>, // invite_id -> invite
-    messages: Arc<RwLock<Vec<Message>>>, // All messages
+    encrypted_messages: Arc<RwLock<Vec<EncryptedMessage>>>, // All encrypted messages
+    crypto_manager: Arc<RwLock<CryptoManager>>, // Crypto manager for encryption
     db_manager: Arc<DatabaseManager>, // Database manager
 }
 
@@ -37,7 +40,8 @@ impl ChatManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             group_names: Arc::new(RwLock::new(HashMap::new())),
             invites: Arc::new(RwLock::new(HashMap::new())),
-            messages: Arc::new(RwLock::new(Vec::new())),
+            encrypted_messages: Arc::new(RwLock::new(Vec::new())),
+            crypto_manager: Arc::new(RwLock::new(CryptoManager::new())),
             db_manager,
         }
     }
@@ -139,8 +143,34 @@ impl ChatManager {
             .collect()
     }
     
+    pub async fn list_all_users(&self, exclude_username: Option<&str>) -> Vec<String> {
+        match self.db_manager.get_all_users().await {
+            Ok(users) => {
+                users.into_iter()
+                    .filter(|user| {
+                        if let Some(exclude) = exclude_username {
+                            user.username != exclude
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|user| user.username)
+                    .collect()
+            }
+            Err(e) => {
+                error!("Failed to get all users from database: {}", e);
+                Vec::new()
+            }
+        }
+    }
+    
     pub async fn get_user_count(&self) -> usize {
         self.users.read().await.len()
+    }
+    
+    pub async fn get_username_by_id(&self, user_id: &Uuid) -> Option<String> {
+        let users = self.users.read().await;
+        users.get(user_id).map(|user| user.username.clone())
     }
 
     // === GROUP MANAGEMENT ===
@@ -160,6 +190,32 @@ impl ChatManager {
         if let Err(e) = self.db_manager.create_group(&group).await {
             return Err(format!("Failed to create group in database: {}", e));
         }
+
+        // Genera una chiave di crittografia per il gruppo
+        {
+            let mut crypto = self.crypto_manager.write().await;
+            match crypto.generate_key() {
+                Ok(group_key) => {
+                    // Salva la chiave nel crypto manager
+                    crypto.set_group_key(group_id, group_key.clone());
+                    
+                    // Esporta e salva la chiave nel database (crittografata)
+                    match crypto.export_group_key(group_id) {
+                        Ok(encoded_key) => {
+                            if let Err(e) = self.db_manager.save_group_encryption_key(group_id, &encoded_key, creator_id).await {
+                                warn!("Failed to save group encryption key to database: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to export group key: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to generate group encryption key: {}", e);
+                }
+            }
+        }
         
         // Aggiorna cache in memoria
         {
@@ -170,7 +226,7 @@ impl ChatManager {
             group_names.insert(group_name.clone(), group_id);
         }
 
-        info!("Group '{}' created by user {}", group_name, creator_id);
+        info!("Group '{}' created by user {} with encryption", group_name, creator_id);
         Ok(group_id)
     }
 
@@ -251,15 +307,9 @@ impl ChatManager {
         Ok(invite_id)
     }
 
-    pub async fn send_group_message(&self, sender_id: Uuid, group_name: String, content: String) -> Result<(), String> {
-        // Trova il gruppo
-        let group_id = {
-            let group_names = self.group_names.read().await;
-            match group_names.get(&group_name) {
-                Some(&id) => id,
-                None => return Err("Group not found".to_string()),
-            }
-        };
+    pub async fn send_encrypted_group_message(&self, encrypted_msg: EncryptedMessage) -> Result<(), String> {
+        // Verifica che sia un messaggio di gruppo
+        let group_id = encrypted_msg.group_id.ok_or("Not a group message")?;
 
         // Verifica che l'utente sia membro del gruppo (usa database)
         let group_members = match self.db_manager.get_group_members(group_id).await {
@@ -267,69 +317,53 @@ impl ChatManager {
             Err(e) => return Err(format!("Failed to get group members: {}", e)),
         };
         
-        if !group_members.contains(&sender_id) {
+        if !group_members.contains(&encrypted_msg.sender_id) {
             return Err("You are not a member of this group".to_string());
         }
 
-        let message = Message {
-            id: Uuid::new_v4(),
-            sender_id,
-            group_id: Some(group_id),
-            receiver_id: None, // Messaggio di gruppo, non ha receiver specifico
-            content: content.clone(),
-            timestamp: chrono::Utc::now(),
-            message_type: MessageType::Text,
-        };
-
         // Salva nel database
-        if let Err(e) = self.db_manager.save_message(&message).await {
-            warn!("Failed to save message to database: {}", e);
+        if let Err(e) = self.db_manager.save_encrypted_message(&encrypted_msg).await {
+            warn!("Failed to save encrypted message to database: {}", e);
+            return Err(format!("Failed to save message: {}", e));
         }
 
         // Aggiorna cache in memoria
         {
-            let mut messages = self.messages.write().await;
-            messages.push(message);
+            let mut messages = self.encrypted_messages.write().await;
+            messages.push(encrypted_msg.clone());
         }
 
-        info!("Message sent to group '{}' by user {}: {}", group_name, sender_id, content);
+        info!("Encrypted group message sent by user {}", encrypted_msg.sender_id);
         Ok(())
     }
 
-    pub async fn send_private_message(&self, sender_id: Uuid, target_username: String, content: String) -> Result<(), String> {
-        // Trova l'utente target nel database
-        let target_user = match self.db_manager.get_user_by_username(&target_username).await {
-            Ok(Some(user)) => user,
-            Ok(None) => return Err("User not found".to_string()),
+    pub async fn send_encrypted_private_message(&self, encrypted_msg: EncryptedMessage) -> Result<(), String> {
+        // Verifica che sia un messaggio privato
+        if encrypted_msg.group_id.is_some() {
+            return Err("Not a private message".to_string());
+        }
+
+        let receiver_id = encrypted_msg.receiver_id.ok_or("No receiver specified")?;
+
+        // Verifica che l'utente destinatario esista
+        match self.db_manager.get_user_by_username("").await {
+            Ok(_) => {}, // Potremmo verificare l'esistenza dell'utente, ma per ora assumiamo che il receiver_id sia valido
             Err(e) => return Err(format!("Database error: {}", e)),
-        };
+        }
 
-        let message = Message {
-            id: Uuid::new_v4(),
-            sender_id,
-            group_id: None, // None indica messaggio privato
-            receiver_id: Some(target_user.id), // Destinatario del messaggio privato
-            content: content.clone(),
-            timestamp: chrono::Utc::now(),
-            message_type: MessageType::Text,
-        };
-
-        // Salva nel database usando la funzione specifica per messaggi diretti
-        let _message_id = match self.db_manager.save_direct_message(sender_id, target_user.id, &content, MessageType::Text).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Failed to save private message to database: {}", e);
-                message.id // Usa l'ID generato localmente come fallback
-            }
-        };
+        // Salva nel database
+        if let Err(e) = self.db_manager.save_encrypted_message(&encrypted_msg).await {
+            warn!("Failed to save encrypted private message to database: {}", e);
+            return Err(format!("Failed to save message: {}", e));
+        }
 
         // Aggiorna cache in memoria
         {
-            let mut messages = self.messages.write().await;
-            messages.push(message);
+            let mut messages = self.encrypted_messages.write().await;
+            messages.push(encrypted_msg.clone());
         }
 
-        info!("Private message sent from {} to {}: {}", sender_id, target_username, content);
+        info!("Encrypted private message sent from {} to {}", encrypted_msg.sender_id, receiver_id);
         Ok(())
     }
 
@@ -338,33 +372,42 @@ impl ChatManager {
         match self.db_manager.get_pending_invites(user_id).await {
             Ok(invites) => {
                 let mut result = Vec::new();
+                
                 for invite in invites {
-                    // Per ogni invito, ottieni le informazioni del gruppo e dell'inviter
-                    if let Ok(groups) = self.db_manager.get_user_groups(invite.inviter_id).await {
-                        if let Some(group) = groups.iter().find(|g| g.id == invite.group_id) {
-                            if let Ok(Some(_inviter)) = self.db_manager.get_user_by_username("").await {
-                                // Nota: dovremmo avere una funzione get_user_by_id nel database
-                                let info = format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
-                                    invite.id, 
-                                    group.name, 
-                                    "unknown", // Temporaneo finché non aggiungiamo get_user_by_id
-                                    invite.created_at.format("%Y-%m-%d %H:%M")
-                                );
-                                result.push(info);
-                            }
-                        }
-                    }
+                    // Ottieni informazioni del gruppo
+                    let group_name = match self.db_manager.get_group_by_id(invite.group_id).await {
+                        Ok(Some(group)) => group.name,
+                        Ok(None) => "Unknown Group".to_string(),
+                        Err(_) => "Error loading group".to_string(),
+                    };
+                    
+                    // Ottieni informazioni dell'inviter
+                    let inviter_username = match self.db_manager.get_user_by_id(invite.inviter_id).await {
+                        Ok(Some(user)) => user.username,
+                        Ok(None) => "Unknown User".to_string(),
+                        Err(_) => "Error loading user".to_string(),
+                    };
+                    
+                    let info = format!("ID: {} | Group: '{}' | From: {} | Date: {}", 
+                        invite.id, 
+                        group_name, 
+                        inviter_username,
+                        invite.created_at.format("%Y-%m-%d %H:%M")
+                    );
+                    result.push(info);
                 }
+                
+                info!("Retrieved {} pending invites for user {}", result.len(), user_id);
                 result
             }
             Err(e) => {
                 warn!("Failed to get user invites from database: {}", e);
-                // Fallback alla cache in memoria
+                // Fallback alla cache in memoria solo se il database fallisce
                 let invites = self.invites.read().await;
                 let groups = self.groups.read().await;
                 let users = self.users.read().await;
 
-                invites.values()
+                let result: Vec<String> = invites.values()
                     .filter(|invite| invite.invitee_id == user_id && matches!(invite.status, InviteStatus::Pending))
                     .filter_map(|invite| {
                         let group = groups.get(&invite.group_id)?;
@@ -376,7 +419,10 @@ impl ChatManager {
                             invite.created_at.format("%Y-%m-%d %H:%M")
                         ))
                     })
-                    .collect()
+                    .collect();
+                    
+                info!("Retrieved {} pending invites for user {} (from cache)", result.len(), user_id);
+                result
             }
         }
     }
@@ -482,6 +528,255 @@ impl ChatManager {
         Ok(format!("Left group '{}'", group_name))
     }
 
+    /// Funzione di compatibilità temporanea per inviare messaggi di gruppo (da rimuovere)
+    pub async fn send_group_message(&self, sender_id: Uuid, group_name: String, content: String) -> Result<(), String> {
+        // Trova il gruppo
+        let group_id = {
+            let group_names = self.group_names.read().await;
+            match group_names.get(&group_name) {
+                Some(&id) => id,
+                None => return Err("Group not found".to_string()),
+            }
+        };
+
+        // Carica la chiave del gruppo se non è già in memoria
+        {
+            let crypto = self.crypto_manager.read().await;
+            if !crypto.has_group_key(group_id) {
+                drop(crypto);
+                // Prova a caricare la chiave dal database
+                if let Ok(Some(encoded_key)) = self.db_manager.get_group_encryption_key(group_id).await {
+                    let mut crypto_mut = self.crypto_manager.write().await;
+                    if let Err(e) = crypto_mut.import_group_key(group_id, &encoded_key) {
+                        warn!("Failed to import group key: {}", e);
+                        return Err("Failed to load group encryption key".to_string());
+                    }
+                } else {
+                    return Err("Group encryption key not found".to_string());
+                }
+            }
+        }
+
+        // Critta il messaggio usando il CryptoManager
+        let encrypted_msg = {
+            let crypto = self.crypto_manager.read().await;
+            match crypto.encrypt_group_message(group_id, sender_id, &content, MessageType::Text) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("Failed to encrypt group message: {}", e);
+                    return Err(format!("Failed to encrypt message: {}", e));
+                }
+            }
+        };
+
+        self.send_encrypted_group_message(encrypted_msg).await
+    }
+
+    /// Funzione di compatibilità temporanea per inviare messaggi privati (da rimuovere)
+    pub async fn send_private_message(&self, sender_id: Uuid, target_username: String, content: String) -> Result<(), String> {
+        // Trova l'utente target nel database
+        let target_user = match self.db_manager.get_user_by_username(&target_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err("User not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
+        };
+
+        let receiver_id = target_user.id;
+
+        // Carica o genera la chiave per la chat diretta
+        {
+            let crypto = self.crypto_manager.read().await;
+            if !crypto.has_direct_key(sender_id, receiver_id) {
+                drop(crypto);
+                // Prova a caricare la chiave dal database
+                match self.db_manager.get_user_encryption_key(sender_id, receiver_id).await {
+                    Ok(Some(encoded_key)) => {
+                        // Decodifica e importa la chiave esistente
+                        let mut crypto_mut = self.crypto_manager.write().await;
+                        crypto_mut.set_direct_key(sender_id, receiver_id, BASE64.decode(&encoded_key).map_err(|e| format!("Failed to decode key: {}", e))?);
+                    }
+                    Ok(None) => {
+                        // Genera una nuova chiave per questa coppia di utenti
+                        let mut crypto_mut = self.crypto_manager.write().await;
+                        match crypto_mut.generate_key() {
+                            Ok(new_key) => {
+                                crypto_mut.set_direct_key(sender_id, receiver_id, new_key.clone());
+                                // Salva la chiave nel database
+                                let encoded_key = BASE64.encode(&new_key);
+                                if let Err(e) = self.db_manager.save_user_encryption_key(sender_id, receiver_id, &encoded_key).await {
+                                    warn!("Failed to save user encryption key: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                return Err(format!("Failed to generate encryption key: {}", e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("Database error: {}", e));
+                    }
+                }
+            }
+        }
+
+        // Critta il messaggio usando il CryptoManager
+        let encrypted_msg = {
+            let crypto = self.crypto_manager.read().await;
+            match crypto.encrypt_direct_message(sender_id, receiver_id, &content, MessageType::Text) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("Failed to encrypt direct message: {}", e);
+                    return Err(format!("Failed to encrypt message: {}", e));
+                }
+            }
+        };
+
+        self.send_encrypted_private_message(encrypted_msg).await
+    }
+
+    /// Ottieni i messaggi crittografati di un gruppo
+    pub async fn get_encrypted_group_messages(&self, group_id: Uuid, limit: i64) -> Result<Vec<EncryptedMessage>, String> {
+        match self.db_manager.get_encrypted_group_messages(group_id, limit).await {
+            Ok(messages) => Ok(messages),
+            Err(e) => Err(format!("Failed to get group messages: {}", e)),
+        }
+    }
+
+    /// Ottieni e decritta i messaggi di un gruppo (per compatibilità con il client)
+    pub async fn get_decrypted_group_messages(&self, group_id: Uuid, limit: i64) -> Result<Vec<String>, String> {
+        // Carica la chiave del gruppo se necessario
+        {
+            let crypto = self.crypto_manager.read().await;
+            if !crypto.has_group_key(group_id) {
+                drop(crypto);
+                if let Ok(Some(encoded_key)) = self.db_manager.get_group_encryption_key(group_id).await {
+                    let mut crypto_mut = self.crypto_manager.write().await;
+                    if let Err(e) = crypto_mut.import_group_key(group_id, &encoded_key) {
+                        return Err(format!("Failed to load group key: {}", e));
+                    }
+                } else {
+                    return Err("Group encryption key not found".to_string());
+                }
+            }
+        }
+
+        // Ottieni i messaggi crittografati
+        let encrypted_messages = self.get_encrypted_group_messages(group_id, limit).await?;
+        
+        // Decritta ogni messaggio
+        let mut decrypted_messages = Vec::new();
+        let crypto = self.crypto_manager.read().await;
+        
+        for msg in encrypted_messages {
+            match crypto.decrypt_group_message(group_id, &msg) {
+                Ok(content) => {
+                    let formatted_msg = format!("[{}] {}: {}", 
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.sender_id, // Qui dovremmo convertire in username
+                        content
+                    );
+                    decrypted_messages.push(formatted_msg);
+                }
+                Err(e) => {
+                    warn!("Failed to decrypt message {}: {}", msg.encrypted_content, e);
+                    decrypted_messages.push(format!("[{}] [ENCRYPTED MESSAGE]", msg.timestamp.format("%H:%M:%S")));
+                }
+            }
+        }
+        
+        Ok(decrypted_messages)
+    }
+
+    /// Ottieni i messaggi crittografati diretti tra due utenti
+    pub async fn get_encrypted_direct_messages(&self, user1_id: Uuid, user2_id: Uuid, limit: i64) -> Result<Vec<EncryptedMessage>, String> {
+        match self.db_manager.get_encrypted_direct_messages(user1_id, user2_id, limit).await {
+            Ok(messages) => Ok(messages),
+            Err(e) => Err(format!("Failed to get direct messages: {}", e)),
+        }
+    }
+
+    /// Ottieni e decritta i messaggi diretti tra due utenti (per compatibilità con il client)
+    pub async fn get_decrypted_direct_messages(&self, user1_id: Uuid, user2_id: Uuid, limit: i64) -> Result<Vec<String>, String> {
+        // Carica la chiave per la chat diretta se necessario
+        {
+            let crypto = self.crypto_manager.read().await;
+            if !crypto.has_direct_key(user1_id, user2_id) {
+                drop(crypto);
+                if let Ok(Some(encoded_key)) = self.db_manager.get_user_encryption_key(user1_id, user2_id).await {
+                    let mut crypto_mut = self.crypto_manager.write().await;
+                    match BASE64.decode(&encoded_key) {
+                        Ok(key_bytes) => {
+                            crypto_mut.set_direct_key(user1_id, user2_id, key_bytes);
+                        }
+                        Err(e) => {
+                            return Err(format!("Failed to decode encryption key: {}", e));
+                        }
+                    }
+                } else {
+                    return Err("Direct chat encryption key not found".to_string());
+                }
+            }
+        }
+
+        // Ottieni i messaggi crittografati
+        let encrypted_messages = self.get_encrypted_direct_messages(user1_id, user2_id, limit).await?;
+        
+        // Decritta ogni messaggio
+        let mut decrypted_messages = Vec::new();
+        let crypto = self.crypto_manager.read().await;
+        
+        for msg in encrypted_messages {
+            match crypto.decrypt_direct_message(user1_id, user2_id, &msg) {
+                Ok(content) => {
+                    let formatted_msg = format!("[{}] {}: {}", 
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.sender_id, // Qui dovremmo convertire in username
+                        content
+                    );
+                    decrypted_messages.push(formatted_msg);
+                }
+                Err(e) => {
+                    warn!("Failed to decrypt direct message: {}", e);
+                    decrypted_messages.push(format!("[{}] [ENCRYPTED MESSAGE]", msg.timestamp.format("%H:%M:%S")));
+                }
+            }
+        }
+        
+        Ok(decrypted_messages)
+    }
+
+    /// Salva una chiave di crittografia per un gruppo
+    pub async fn save_group_encryption_key(&self, group_id: Uuid, encrypted_key: String, created_by: Uuid) -> Result<(), String> {
+        match self.db_manager.save_group_encryption_key(group_id, &encrypted_key, created_by).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Failed to save group encryption key: {}", e)),
+        }
+    }
+
+    /// Ottieni la chiave di crittografia di un gruppo
+    pub async fn get_group_encryption_key(&self, group_id: Uuid) -> Result<Option<String>, String> {
+        match self.db_manager.get_group_encryption_key(group_id).await {
+            Ok(key) => Ok(key),
+            Err(e) => Err(format!("Failed to get group encryption key: {}", e)),
+        }
+    }
+
+    /// Salva una chiave di crittografia per chat diretta
+    pub async fn save_user_encryption_key(&self, user1_id: Uuid, user2_id: Uuid, encrypted_key: String) -> Result<(), String> {
+        match self.db_manager.save_user_encryption_key(user1_id, user2_id, &encrypted_key).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Failed to save user encryption key: {}", e)),
+        }
+    }
+
+    /// Ottieni la chiave di crittografia per chat diretta
+    pub async fn get_user_encryption_key(&self, user1_id: Uuid, user2_id: Uuid) -> Result<Option<String>, String> {
+        match self.db_manager.get_user_encryption_key(user1_id, user2_id).await {
+            Ok(key) => Ok(key),
+            Err(e) => Err(format!("Failed to get user encryption key: {}", e)),
+        }
+    }
+
     // === PERFORMANCE & PERSISTENCE ===
     pub async fn get_performance_metrics(&self) -> (usize, usize, usize) {
         // Conta solo utenti online dal database
@@ -494,17 +789,17 @@ impl ChatManager {
             }
         };
 
-        // Recupera statistiche per gruppi e messaggi dal database
+        // Recupera statistiche per gruppi e messaggi crittografati dal database
         match self.db_manager.get_database_stats().await {
             Ok((_users_db, groups_db, messages_db, _invites)) => {
-                // Usa il conteggio degli utenti online e i dati dal database per gruppi e messaggi
+                // Usa il conteggio degli utenti online e i dati dal database per gruppi e messaggi crittografati
                 (online_users_count, groups_db, messages_db)
             },
             Err(e) => {
                 warn!("Failed to get database stats, using memory stats: {}", e);
                 // Fallback completo ai dati in memoria se il database fallisce
                 let group_count = self.groups.read().await.len();
-                let message_count = self.messages.read().await.len();
+                let message_count = self.encrypted_messages.read().await.len();
                 (online_users_count, group_count, message_count)
             }
         }

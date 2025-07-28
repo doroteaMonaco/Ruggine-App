@@ -1,4 +1,4 @@
-use crate::chat_manager::ChatManager;
+use crate::server::chat_manager::ChatManager;
 use log::{info, warn, error, debug};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,6 +45,7 @@ async fn send_help(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>) -> Re
 === Ruggine Chat Commands ===
 /register <username>     - Register with a username
 /users                   - List online users
+/all_users               - List all registered users (excluding yourself)
 /create_group <name>     - Create a new group
 /my_groups               - List your groups
 /invite <username> <group_name> - Invite user to group
@@ -119,6 +120,23 @@ async fn process_command(
             let users = chat_manager.list_online_users().await;
             let user_list = users.join(", ");
             send_success(writer, &format!("Online users: {}", user_list)).await?;
+        }
+        "/all_users" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            
+            // Ottieni il nome utente corrente per escluderlo
+            let current_username = if let Some(uid) = user_id {
+                chat_manager.get_username_by_id(&uid).await
+            } else {
+                None
+            };
+            
+            let users = chat_manager.list_all_users(current_username.as_deref()).await;
+            let user_list = users.join(", ");
+            send_success(writer, &format!("All users: {}", user_list)).await?;
         }
         "/create_group" => {
             if user_id.is_none() {

@@ -37,6 +37,8 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageType {
     Text,
+    File,
+    Image,
     SystemNotification,
     UserJoined,
     UserLeft,
@@ -48,6 +50,8 @@ impl std::fmt::Display for MessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MessageType::Text => write!(f, "text"),
+            MessageType::File => write!(f, "file"),
+            MessageType::Image => write!(f, "image"),
             MessageType::SystemNotification => write!(f, "system_notification"),
             MessageType::UserJoined => write!(f, "user_joined"),
             MessageType::UserLeft => write!(f, "user_left"),

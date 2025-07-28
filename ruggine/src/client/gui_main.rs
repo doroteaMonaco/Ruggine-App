@@ -90,19 +90,27 @@ pub enum Message {
     ShowGroupsCreate,
     HideGroupsSubsections,
     
-    // Gestione sottosezioni Invites  
-    ShowInvitesList,
-    ShowInvitesSend,
-    HideInvitesSubsections,
-    
     // Azioni specifiche su elementi delle liste
     LeaveSpecificGroup(String),
     AcceptSpecificInvite(String),
+    InviteToSpecificGroup(String), // Nuovo: invita a un gruppo specifico
+    ShowInviteFormForGroup(String), // Nuovo: mostra form invito per gruppo
+    
+    // Gestione lista utenti per inviti 
+    ShowUsersListForGroup(String), // Mostra lista utenti per invitare al gruppo
+    InviteUserToGroup(String, String), // (username, group_name)
+    HideUsersListForGroup, // Nascondi lista utenti
+    
+    // Gestione form di invito per gruppo specifico
+    InviteToGroupUsernameChanged(String),
+    SendInviteToGroup, // Non ha bisogno del parametro nel match, usa invite_form_group invece
+    CancelInviteToGroup,
     RejectSpecificInvite(String),
     
     // Aggiornamento delle liste
     GroupsListUpdated(Vec<String>),
     InvitesListUpdated(Vec<(String, String)>),
+    UsersListUpdated(Vec<String>), // Lista utenti per inviti
     
     // Dummy message per update interno
     None,
@@ -154,12 +162,16 @@ pub struct ChatApp {
     // Stati delle sottosezioni
     groups_list_view: bool,
     groups_create_view: bool,
-    invites_list_view: bool,
-    invites_send_view: bool,
     
     // Dati delle liste
     my_groups: Vec<String>,
     my_invites: Vec<(String, String)>, // (invite_id, group_name)
+    available_users: Vec<String>, // Lista utenti disponibili per inviti
+    
+    // Gestione form di invito per gruppo specifico
+    invite_form_group: Option<String>, // Gruppo per cui è aperto il form di invito
+    invite_to_group_username: String,  // Username da invitare nel form specifico
+    users_list_for_group: Option<String>, // Gruppo per cui è aperta la lista utenti
     
     // Configurazione
     config: Option<ClientConfig>,
@@ -201,10 +213,12 @@ impl Application for ChatApp {
                 invites_expanded: false,
                 groups_list_view: false,
                 groups_create_view: false,
-                invites_list_view: false,
-                invites_send_view: false,
                 my_groups: Vec::new(),
                 my_invites: Vec::new(),
+                available_users: Vec::new(),
+                invite_form_group: None,
+                invite_to_group_username: String::new(),
+                users_list_for_group: None,
                 config,
             },
             Command::none(),
@@ -277,7 +291,7 @@ impl Application for ChatApp {
                                 }
                             );
                         }
-                    } else if (msg.contains("[Accept]") || msg.contains("[Reject]")) && self.invites_list_view {
+                    } else if (msg.contains("[Accept]") || msg.contains("[Reject]")) && self.invites_expanded {
                         // Ricarica la lista degli inviti dopo aver accettato/rifiutato
                         if let Some(connection) = &self.persistent_connection {
                             let conn = connection.clone();
@@ -611,10 +625,23 @@ impl Application for ChatApp {
             
             Message::ToggleInvitesSection => {
                 self.invites_expanded = !self.invites_expanded;
-                // Reset delle sottosezioni quando si chiude/apre la sezione principale
-                if !self.invites_expanded {
-                    self.invites_list_view = false;
-                    self.invites_send_view = false;
+                // Quando si apre la sezione inviti, carica automaticamente la lista
+                if self.invites_expanded {
+                    if matches!(self.connection_state, ConnectionState::Registered) {
+                        if let Some(connection) = &self.persistent_connection {
+                            let conn = connection.clone();
+                            return Command::perform(
+                                Self::send_command_persistent(conn, "/my_invites".to_string()),
+                                |result| match result {
+                                    Ok(response) => {
+                                        let invites = Self::parse_invites_response(&response);
+                                        Message::InvitesListUpdated(invites)
+                                    }
+                                    Err(e) => Message::ServerMessage(format!("Error: {}", e))
+                                }
+                            );
+                        }
+                    }
                 }
                 Command::none()
             }
@@ -650,40 +677,6 @@ impl Application for ChatApp {
             Message::HideGroupsSubsections => {
                 self.groups_list_view = false;
                 self.groups_create_view = false;
-                Command::none()
-            }
-            
-            Message::ShowInvitesList => {
-                self.invites_list_view = true;
-                self.invites_send_view = false;
-                // Carica la lista degli inviti
-                if matches!(self.connection_state, ConnectionState::Registered) {
-                    if let Some(connection) = &self.persistent_connection {
-                        let conn = connection.clone();
-                        return Command::perform(
-                            Self::send_command_persistent(conn, "/my_invites".to_string()),
-                            |result| match result {
-                                Ok(response) => {
-                                    let invites = Self::parse_invites_response(&response);
-                                    Message::InvitesListUpdated(invites)
-                                }
-                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
-                            }
-                        );
-                    }
-                }
-                Command::none()
-            }
-            
-            Message::ShowInvitesSend => {
-                self.invites_send_view = true;
-                self.invites_list_view = false;
-                Command::none()
-            }
-            
-            Message::HideInvitesSubsections => {
-                self.invites_list_view = false;
-                self.invites_send_view = false;
                 Command::none()
             }
             
@@ -772,6 +765,165 @@ impl Application for ChatApp {
             Message::InvitesListUpdated(invites) => {
                 self.my_invites = invites;
                 self.messages.push(format!("Invites list updated: {} invites found", self.my_invites.len()));
+                Command::none()
+            }
+            
+            Message::UsersListUpdated(users) => {
+                self.available_users = users;
+                self.messages.push(format!("Users list updated: {} users found", self.available_users.len()));
+                Command::none()
+            }
+            
+            // Gestione lista utenti per inviti a gruppi
+            Message::ShowUsersListForGroup(group_name) => {
+                // Mostra la lista degli utenti per invitare al gruppo
+                self.users_list_for_group = Some(group_name);
+                self.invite_form_group = None; // Chiudi il form se era aperto
+                
+                // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
+                if matches!(self.connection_state, ConnectionState::Registered) {
+                    if let Some(connection) = &self.persistent_connection {
+                        let conn = connection.clone();
+                        Command::perform(
+                            Self::send_command_persistent(conn, "/all_users".to_string()),
+                            |result| match result {
+                                Ok(response) => {
+                                    let users = Self::parse_users_response(&response);
+                                    Message::UsersListUpdated(users)
+                                }
+                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
+                            }
+                        )
+                    } else {
+                        self.messages.push("No persistent connection available".to_string());
+                        Command::none()
+                    }
+                } else {
+                    self.messages.push("Please register first".to_string());
+                    Command::none()
+                }
+            }
+            
+            Message::InviteUserToGroup(username, group_name) => {
+                // Invia l'invito direttamente
+                if matches!(self.connection_state, ConnectionState::Registered) {
+                    if let Some(connection) = &self.persistent_connection {
+                        self.messages.push(format!("Inviting '{}' to group '{}'...", username, group_name));
+                        let conn = connection.clone();
+                        let command = format!("/invite {} {}", username, group_name);
+                        
+                        Command::perform(
+                            Self::send_command_persistent(conn, command),
+                            |result| match result {
+                                Ok(response) => Message::ServerMessage(format!("[Invite] {}", response)),
+                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
+                            }
+                        )
+                    } else {
+                        self.messages.push("No persistent connection available".to_string());
+                        Command::none()
+                    }
+                } else {
+                    self.messages.push("Please register first".to_string());
+                    Command::none()
+                }
+            }
+            
+            Message::HideUsersListForGroup => {
+                // Nascondi la lista degli utenti
+                self.users_list_for_group = None;
+                Command::none()
+            }
+            
+            // Nuovi casi per la gestione degli inviti per gruppo specifico
+            Message::InviteToSpecificGroup(group_name) => {
+                // Mostra il form di invito per il gruppo specifico
+                self.invite_form_group = Some(group_name);
+                self.invite_to_group_username.clear();
+                Command::none()
+            }
+            
+            Message::ShowInviteFormForGroup(group_name) => {
+                // Mostra direttamente la lista degli utenti invece del form
+                self.users_list_for_group = Some(group_name);
+                self.invite_form_group = None;
+                
+                // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
+                if matches!(self.connection_state, ConnectionState::Registered) {
+                    if let Some(connection) = &self.persistent_connection {
+                        let conn = connection.clone();
+                        Command::perform(
+                            Self::send_command_persistent(conn, "/all_users".to_string()),
+                            |result| match result {
+                                Ok(response) => {
+                                    let users = Self::parse_users_response(&response);
+                                    Message::UsersListUpdated(users)
+                                }
+                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
+                            }
+                        )
+                    } else {
+                        self.messages.push("No persistent connection available".to_string());
+                        Command::none()
+                    }
+                } else {
+                    self.messages.push("Please register first".to_string());
+                    Command::none()
+                }
+            }
+            
+            Message::InviteToGroupUsernameChanged(username) => {
+                // Aggiorna il campo username per l'invito al gruppo
+                self.invite_to_group_username = username;
+                Command::none()
+            }
+            
+            Message::SendInviteToGroup => {
+                // Invia l'invito al gruppo specifico
+                if matches!(self.connection_state, ConnectionState::Registered) {
+                    if let Some(group_name) = &self.invite_form_group {
+                        let username = self.invite_to_group_username.clone();
+                        
+                        if !username.is_empty() {
+                            if let Some(connection) = &self.persistent_connection {
+                                self.messages.push(format!("Inviting '{}' to group '{}'...", username, group_name));
+                                let conn = connection.clone();
+                                let command = format!("/invite {} {}", username, group_name);
+                                
+                                // Chiudi il form dopo aver inviato l'invito
+                                self.invite_form_group = None;
+                                self.invite_to_group_username.clear();
+                                
+                                Command::perform(
+                                    Self::send_command_persistent(conn, command),
+                                    |result| match result {
+                                        Ok(response) => Message::ServerMessage(format!("[Invite] {}", response)),
+                                        Err(e) => Message::ServerMessage(format!("Error: {}", e))
+                                    }
+                                )
+                            } else {
+                                self.messages.push("No persistent connection available".to_string());
+                                Command::none()
+                            }
+                        } else {
+                            self.messages.push("WARNING: Username cannot be empty".to_string());
+                            Command::none()
+                        }
+                    } else {
+                        self.messages.push("No group selected for invite".to_string());
+                        Command::none()
+                    }
+                } else {
+                    self.messages.push("Please register first".to_string());
+                    Command::none()
+                }
+            }
+            
+            Message::CancelInviteToGroup => {
+                // Cancella il form di invito e la lista utenti
+                self.invite_form_group = None;
+                self.invite_to_group_username.clear();
+                self.users_list_for_group = None;
                 Command::none()
             }
             
@@ -957,6 +1109,10 @@ impl ChatApp {
                                 .map(|group| {
                                     row![
                                         text(format!("👥 {}", group)).width(Length::Fill).font(EMOJI_FONT),
+                                        button(text("➕").font(EMOJI_FONT))
+                                            .on_press(Message::ShowInviteFormForGroup(group.clone()))
+                                            .padding(5)
+                                            .width(Length::Fixed(35.0)),
                                         button(text("❌ Leave").font(EMOJI_FONT))
                                             .on_press(Message::LeaveSpecificGroup(group.clone()))
                                             .padding(5)
@@ -969,6 +1125,63 @@ impl ChatApp {
                         ).spacing(5)
                     ].spacing(10);
                     groups_section = groups_section.push(groups_list_section);
+                    
+                    // Lista utenti per invito a gruppo specifico (se attiva)
+                    if let Some(ref selected_group) = self.users_list_for_group {
+                        if !self.available_users.is_empty() {
+                            let users_list_section = column![
+                                text(format!("👥 Invite users to group: {}", selected_group)).size(14).font(BOLD_FONT),
+                                column(
+                                    self.available_users
+                                        .iter()
+                                        .map(|user| {
+                                            row![
+                                                text(format!("👤 {}", user)).width(Length::Fill).font(EMOJI_FONT),
+                                                button(text("📤 Invite").font(EMOJI_FONT))
+                                                    .on_press(Message::InviteUserToGroup(user.clone(), selected_group.clone()))
+                                                    .padding(5)
+                                                    .width(Length::Fixed(80.0)),
+                                            ].spacing(10)
+                                            .align_items(iced::Alignment::Center)
+                                            .into()
+                                        })
+                                        .collect::<Vec<_>>()
+                                ).spacing(5),
+                                button(text("❌ Cancel").font(EMOJI_FONT))
+                                    .on_press(Message::HideUsersListForGroup)
+                                    .padding(5),
+                            ].spacing(10);
+                            groups_section = groups_section.push(users_list_section);
+                        } else {
+                            let loading_section = column![
+                                text(format!("👥 Invite users to group: {}", selected_group)).size(14).font(BOLD_FONT),
+                                text("Loading users..."),
+                                button(text("❌ Cancel").font(EMOJI_FONT))
+                                    .on_press(Message::HideUsersListForGroup)
+                                    .padding(5),
+                            ].spacing(10);
+                            groups_section = groups_section.push(loading_section);
+                        }
+                    }
+                    
+                    // Form di invito per gruppo specifico (se attivo) - DEPRECATED, mantenuto per compatibilità
+                    if let Some(ref selected_group) = self.invite_form_group {
+                        let invite_form = column![
+                            text(format!("🎯 Invite user to group: {}", selected_group)).size(14).font(BOLD_FONT),
+                            text_input("Enter username to invite", &self.invite_to_group_username)
+                                .on_input(Message::InviteToGroupUsernameChanged)
+                                .padding(5),
+                            row![
+                                button(text("✅ Send Invite").font(EMOJI_FONT))
+                                    .on_press(Message::SendInviteToGroup)
+                                    .padding(5),
+                                button(text("❌ Cancel").font(EMOJI_FONT))
+                                    .on_press(Message::CancelInviteToGroup)
+                                    .padding(5),
+                            ].spacing(10),
+                        ].spacing(5);
+                        groups_section = groups_section.push(invite_form);
+                    }
                 } else {
                     groups_section = groups_section.push(text("No groups found or loading..."));
                 }
@@ -1009,69 +1222,34 @@ impl ChatApp {
         ];
 
         if self.invites_expanded {
-            // Pulsanti per sottosezioni
-            let invites_submenu = row![
-                button(text("📩 List Invites").font(EMOJI_FONT))
-                    .on_press(Message::ShowInvitesList)
-                    .padding(5),
-                button(text("📤 Send Invite").font(EMOJI_FONT))
-                    .on_press(Message::ShowInvitesSend)
-                    .padding(5),
-            ].spacing(10);
-            
-            invites_section = invites_section.push(invites_submenu);
-            
-            // Mostra la vista specifica
-            if self.invites_list_view {
-                // Lista degli inviti ricevuti
-                if !self.my_invites.is_empty() {
-                    let invites_list_section = column![
-                        text("Received Invites:").size(14),
-                        column(
-                            self.my_invites
-                                .iter()
-                                .map(|(invite_id, group_name)| {
-                                    row![
-                                        text(format!("📩 Group: {} (ID: {})", group_name, invite_id)).width(Length::Fill).font(EMOJI_FONT),
-                                        button(text("✅ Accept").font(EMOJI_FONT))
-                                            .on_press(Message::AcceptSpecificInvite(invite_id.clone()))
-                                            .padding(5)
-                                            .width(Length::Fixed(80.0)),
-                                        button(text("❌ Reject").font(EMOJI_FONT))
-                                            .on_press(Message::RejectSpecificInvite(invite_id.clone()))
-                                            .padding(5)
-                                            .width(Length::Fixed(80.0)),
-                                    ].spacing(10)
-                                    .align_items(iced::Alignment::Center)
-                                    .into()
-                                })
-                                .collect::<Vec<_>>()
-                        ).spacing(5)
-                    ].spacing(10);
-                    invites_section = invites_section.push(invites_list_section);
-                } else {
-                    invites_section = invites_section.push(text("No pending invites or loading..."));
-                }
-            } else if self.invites_send_view {
-                // Form per inviare inviti
-                let send_invite_form = column![
-                    text("Send Invite:").size(14),
-                    text_input("Username to invite", &self.invite_username)
-                        .on_input(Message::InviteUsernameChanged)
-                        .padding(5),
-                    text_input("Group name", &self.invite_group)
-                        .on_input(Message::InviteGroupChanged)
-                        .padding(5),
-                    row![
-                        button(text("📤 Send Invite").font(EMOJI_FONT))
-                            .on_press(Message::InviteUserPressed)
-                            .padding(5),
-                        button(text("❌ Cancel").font(EMOJI_FONT))
-                            .on_press(Message::HideInvitesSubsections)
-                            .padding(5),
-                    ].spacing(10),
-                ].spacing(5);
-                invites_section = invites_section.push(send_invite_form);
+            // Mostra direttamente la lista degli inviti ricevuti
+            if !self.my_invites.is_empty() {
+                let invites_list_section = column![
+                    text("Received Invites:").size(14),
+                    column(
+                        self.my_invites
+                            .iter()
+                            .map(|(invite_id, group_name)| {
+                                row![
+                                    text(format!("📩 Group: {} (ID: {})", group_name, invite_id)).width(Length::Fill).font(EMOJI_FONT),
+                                    button(text("✅ Accept").font(EMOJI_FONT))
+                                        .on_press(Message::AcceptSpecificInvite(invite_id.clone()))
+                                        .padding(5)
+                                        .width(Length::Fixed(80.0)),
+                                    button(text("❌ Reject").font(EMOJI_FONT))
+                                        .on_press(Message::RejectSpecificInvite(invite_id.clone()))
+                                        .padding(5)
+                                        .width(Length::Fixed(80.0)),
+                                ].spacing(10)
+                                .align_items(iced::Alignment::Center)
+                                .into()
+                            })
+                            .collect::<Vec<_>>()
+                    ).spacing(5)
+                ].spacing(10);
+                invites_section = invites_section.push(invites_list_section);
+            } else {
+                invites_section = invites_section.push(text("No pending invites or loading..."));
             }
         }
 
@@ -1199,11 +1377,36 @@ impl ChatApp {
         conn.writer.write_all(b"\n").await?;
         conn.writer.flush().await?;
         
-        // Leggi la risposta
-        let mut response = String::new();
-        conn.reader.read_line(&mut response).await?;
+        // Leggi la risposta (potrebbe essere multi-riga)
+        let mut full_response = String::new();
+        let mut first_line = String::new();
+        conn.reader.read_line(&mut first_line).await?;
+        full_response.push_str(&first_line);
         
-        Ok(response.trim().to_string())
+        // Se la prima riga contiene "Your pending invites:" o altri pattern multi-riga,
+        // continua a leggere le righe successive
+        if first_line.contains("Your pending invites:") || 
+           first_line.contains("Your groups:") ||
+           first_line.contains("Online users:") ||
+           first_line.contains("All users:") {
+            
+            // Leggi righe aggiuntive con timeout
+            loop {
+                let mut line = String::new();
+                match tokio::time::timeout(tokio::time::Duration::from_millis(100), conn.reader.read_line(&mut line)).await {
+                    Ok(Ok(0)) => break, // Connessione chiusa
+                    Ok(Ok(_)) => {
+                        if line.trim().is_empty() {
+                            break; // Riga vuota indica fine della risposta multi-riga
+                        }
+                        full_response.push_str(&line);
+                    }
+                    _ => break, // Timeout o errore - fine della risposta
+                }
+            }
+        }
+        
+        Ok(full_response.trim().to_string())
     }
     
     async fn connect_and_register(host: String, port: String, username: String) -> Result<String, Box<dyn std::error::Error>> {
@@ -1302,6 +1505,7 @@ impl ChatApp {
         // Esempi di risposta:
         // - "OK: You have no pending invites"
         // - "OK: Your pending invites:\n  ID: uuid | Group: 'gruppo1' | From: username | Date: 2025-01-01 12:00"
+        
         if response.starts_with("OK:") {
             if response.contains("You have no pending invites") {
                 return Vec::new();
@@ -1311,24 +1515,67 @@ impl ChatApp {
                 let mut invites = Vec::new();
                 
                 for line in lines.iter().skip(1) { // Salta la prima riga "OK: Your pending invites:"
-                    let line = line.trim();
+                    let line = line.trim(); // Rimuove spazi iniziali e finali
+                    
                     if line.is_empty() {
                         continue;
                     }
                     
                     // Parse formato: "ID: uuid | Group: 'gruppo1' | From: username | Date: 2025-01-01 12:00"
-                    if let Some(id_part) = line.split(" | ").next() {
-                        if let Some(invite_id) = id_part.strip_prefix("ID: ") {
-                            // Cerca la parte del gruppo
-                            if let Some(group_part) = line.split(" | ").nth(1) {
-                                if let Some(group_name) = group_part.strip_prefix("Group: '").and_then(|s| s.strip_suffix("'")) {
-                                    invites.push((invite_id.to_string(), group_name.to_string()));
+                    if line.starts_with("ID: ") {
+                        let parts: Vec<&str> = line.split(" | ").collect();
+                        
+                        if let Some(id_part) = parts.get(0) {
+                            if let Some(invite_id) = id_part.strip_prefix("ID: ") {
+                                // Cerca la parte del gruppo
+                                if let Some(group_part) = parts.get(1) {
+                                    if let Some(group_name) = group_part.strip_prefix("Group: '").and_then(|s| s.strip_suffix("'")) {
+                                        invites.push((invite_id.to_string(), group_name.to_string()));
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 invites
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+    
+    fn parse_users_response(response: &str) -> Vec<String> {
+        // Esempi di risposta:
+        // - "OK: Online users: user1, user2, user3"
+        // - "OK: All users: user1, user2, user3"
+        // - "OK: No users online"
+        if response.starts_with("OK:") {
+            if response.contains("No users online") {
+                return Vec::new();
+            } else if response.contains("Online users:") {
+                let users_part = response.split("Online users:").nth(1).unwrap_or("").trim();
+                if users_part.is_empty() {
+                    Vec::new()
+                } else {
+                    users_part
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                }
+            } else if response.contains("All users:") {
+                let users_part = response.split("All users:").nth(1).unwrap_or("").trim();
+                if users_part.is_empty() {
+                    Vec::new()
+                } else {
+                    users_part
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                }
             } else {
                 Vec::new()
             }

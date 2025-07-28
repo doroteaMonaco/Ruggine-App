@@ -1,4 +1,5 @@
 use crate::common::models::*;
+use crate::common::crypto::EncryptedMessage;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -11,10 +12,33 @@ pub enum ClientMessage {
     /// Login di un utente esistente
     Login { username: String },
     
-    /// Invio di un messaggio
-    SendMessage { 
-        content: String, 
-        group_id: Option<Uuid> 
+    /// Invio di un messaggio crittografato
+    SendEncryptedMessage { 
+        encrypted_message: EncryptedMessage 
+    },
+    
+    /// Richiesta di chiave di crittografia per un gruppo
+    RequestGroupKey { 
+        group_id: Uuid 
+    },
+    
+    /// Condivisione di chiave per nuovo membro del gruppo
+    ShareGroupKey { 
+        group_id: Uuid, 
+        encrypted_key: String, 
+        target_user: Uuid 
+    },
+    
+    /// Invio di un messaggio crittografato di gruppo
+    SendEncryptedGroupMessage { 
+        group_name: String,
+        encrypted_message: EncryptedMessage 
+    },
+    
+    /// Invio di un messaggio crittografato privato
+    SendEncryptedPrivateMessage { 
+        target_username: String,
+        encrypted_message: EncryptedMessage 
     },
     
     /// Creazione di un nuovo gruppo
@@ -61,6 +85,22 @@ pub enum ServerMessage {
     
     /// Errore di login
     LoginFailed { reason: String },
+    
+    /// Nuovo messaggio crittografato ricevuto
+    EncryptedMessageReceived { 
+        encrypted_message: EncryptedMessage 
+    },
+    
+    /// Chiave di crittografia del gruppo condivisa
+    GroupKeyShared { 
+        group_id: Uuid, 
+        encrypted_key: String 
+    },
+    
+    /// Lista messaggi crittografati di un gruppo
+    EncryptedGroupMessages { 
+        messages: Vec<EncryptedMessage> 
+    },
     
     /// Nuovo messaggio ricevuto
     MessageReceived { message: Message, sender: User },
