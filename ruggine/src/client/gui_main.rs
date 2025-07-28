@@ -1,15 +1,23 @@
 use iced::{
     widget::{button, column, container, row, text, text_input, scrollable, radio},
-    Application, Command, Element, Length, Settings, Theme,
+    Application, Command, Element, Length, Settings, Theme, Font, Color,
 };
 use log::error;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufWriter, BufReader};
-use tokio::sync::mpsc;
 
 use ruggine::client::ClientConfig;
+
+// Font per emoji
+const EMOJI_FONT: Font = Font::with_name("Segoe UI Emoji");
+// Font grassetto per i titoli
+const BOLD_FONT: Font = Font {
+    family: iced::font::Family::SansSerif,
+    weight: iced::font::Weight::Bold,
+    ..Font::DEFAULT
+};
 
 // Struttura per mantenere la connessione persistente
 #[derive(Debug)]
@@ -878,22 +886,47 @@ impl ChatApp {
             ConnectionState::Error(e) => &format!("[ERROR] {}", e),
         };
 
-        let disconnect_button = button("Disconnect")
-            .on_press(Message::DisconnectPressed)
-            .padding(10);
+        // Header con titolo e disconnect button
+        let header = row![
+            text("Ruggine Chat - Main Actions")
+                .size(24)
+                .horizontal_alignment(iced::alignment::Horizontal::Center),
+            // Spazio per spingere il pulsante a destra
+            text("").width(Length::Fill),
+            // Pulsante disconnect rosso in alto a destra
+            button(text("🔌 Disconnect").font(EMOJI_FONT))
+                .on_press(Message::DisconnectPressed)
+                .style(iced::theme::Button::Destructive)
+                .padding(10),
+        ]
+        .align_items(iced::Alignment::Center)
+        .width(Length::Fill);
 
         // Sezione Users
+        let users_header = row![
+            text("👤").font(EMOJI_FONT).size(20),
+            text(" Users").font(BOLD_FONT).size(20),
+        ]
+        .align_items(iced::Alignment::Center);
+        
         let users_section = column![
-            text("Users").size(18),
-            button("List Users")
+            users_header,
+            button(text("👥 List Users").font(EMOJI_FONT))
                 .on_press(Message::ListUsersPressed)
                 .padding(5),
         ].spacing(5);
 
         // Sezione Groups con toggle
-        let groups_button_text = if self.groups_expanded { "▼ Groups" } else { "▶ Groups" };
+        let groups_section_header = row![
+            text("👥").font(EMOJI_FONT).size(20),
+            text(" Groups").font(BOLD_FONT).size(20),
+        ]
+        .align_items(iced::Alignment::Center);
+        
+        let groups_button_text = if self.groups_expanded { "🔽 Groups" } else { "▶️ Groups" };
         let mut groups_section = column![
-            button(groups_button_text)
+            groups_section_header,
+            button(text(groups_button_text).font(EMOJI_FONT))
                 .on_press(Message::ToggleGroupsSection)
                 .width(Length::Fixed(150.0))
                 .padding(8),
@@ -902,10 +935,10 @@ impl ChatApp {
         if self.groups_expanded {
             // Pulsanti per sottosezioni
             let groups_submenu = row![
-                button("List Groups")
+                button(text("📋 List Groups").font(EMOJI_FONT))
                     .on_press(Message::ShowGroupsList)
                     .padding(5),
-                button("Create Group")
+                button(text("➕ Create Group").font(EMOJI_FONT))
                     .on_press(Message::ShowGroupsCreate)
                     .padding(5),
             ].spacing(10);
@@ -923,8 +956,8 @@ impl ChatApp {
                                 .iter()
                                 .map(|group| {
                                     row![
-                                        text(group).width(Length::Fill),
-                                        button("✗ Leave")
+                                        text(format!("👥 {}", group)).width(Length::Fill).font(EMOJI_FONT),
+                                        button(text("❌ Leave").font(EMOJI_FONT))
                                             .on_press(Message::LeaveSpecificGroup(group.clone()))
                                             .padding(5)
                                             .width(Length::Fixed(80.0)),
@@ -947,10 +980,10 @@ impl ChatApp {
                         .on_input(Message::GroupNameChanged)
                         .padding(5),
                     row![
-                        button("Create Group")
+                        button(text("✅ Create Group").font(EMOJI_FONT))
                             .on_press(Message::CreateGroupPressed)
                             .padding(5),
-                        button("Cancel")
+                        button(text("❌ Cancel").font(EMOJI_FONT))
                             .on_press(Message::HideGroupsSubsections)
                             .padding(5),
                     ].spacing(10),
@@ -960,9 +993,16 @@ impl ChatApp {
         }
 
         // Sezione Invites con toggle
-        let invites_button_text = if self.invites_expanded { "▼ Invites" } else { "▶ Invites" };
+        let invites_section_header = row![
+            text("📮").font(EMOJI_FONT).size(20),
+            text(" Invites").font(BOLD_FONT).size(20),
+        ]
+        .align_items(iced::Alignment::Center);
+        
+        let invites_button_text = if self.invites_expanded { "🔽 Invites" } else { "▶️ Invites" };
         let mut invites_section = column![
-            button(invites_button_text)
+            invites_section_header,
+            button(text(invites_button_text).font(EMOJI_FONT))
                 .on_press(Message::ToggleInvitesSection)
                 .width(Length::Fixed(150.0))
                 .padding(8),
@@ -971,10 +1011,10 @@ impl ChatApp {
         if self.invites_expanded {
             // Pulsanti per sottosezioni
             let invites_submenu = row![
-                button("List Invites")
+                button(text("📩 List Invites").font(EMOJI_FONT))
                     .on_press(Message::ShowInvitesList)
                     .padding(5),
-                button("Send Invite")
+                button(text("📤 Send Invite").font(EMOJI_FONT))
                     .on_press(Message::ShowInvitesSend)
                     .padding(5),
             ].spacing(10);
@@ -992,12 +1032,12 @@ impl ChatApp {
                                 .iter()
                                 .map(|(invite_id, group_name)| {
                                     row![
-                                        text(format!("Group: {} (ID: {})", group_name, invite_id)).width(Length::Fill),
-                                        button("✓ Accept")
+                                        text(format!("📩 Group: {} (ID: {})", group_name, invite_id)).width(Length::Fill).font(EMOJI_FONT),
+                                        button(text("✅ Accept").font(EMOJI_FONT))
                                             .on_press(Message::AcceptSpecificInvite(invite_id.clone()))
                                             .padding(5)
                                             .width(Length::Fixed(80.0)),
-                                        button("✗ Reject")
+                                        button(text("❌ Reject").font(EMOJI_FONT))
                                             .on_press(Message::RejectSpecificInvite(invite_id.clone()))
                                             .padding(5)
                                             .width(Length::Fixed(80.0)),
@@ -1023,10 +1063,10 @@ impl ChatApp {
                         .on_input(Message::InviteGroupChanged)
                         .padding(5),
                     row![
-                        button("Send Invite")
+                        button(text("📤 Send Invite").font(EMOJI_FONT))
                             .on_press(Message::InviteUserPressed)
                             .padding(5),
-                        button("Cancel")
+                        button(text("❌ Cancel").font(EMOJI_FONT))
                             .on_press(Message::HideInvitesSubsections)
                             .padding(5),
                     ].spacing(10),
@@ -1052,14 +1092,10 @@ impl ChatApp {
         ].spacing(5);
 
         let content = column![
-            text("Ruggine Chat - Main Actions")
-                .size(24)
-                .horizontal_alignment(iced::alignment::Horizontal::Center),
+            header,
             
             text(status_text).size(16),
             text(format!("Logged in as: {}", self.username)).size(14),
-            
-            disconnect_button,
             
             users_section,
             groups_section,
