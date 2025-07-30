@@ -99,3 +99,7 @@ input area non c'è
 fare login
 trigger per messaggi effimeri
 richieste di amicizia
+
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
