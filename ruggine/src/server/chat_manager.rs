@@ -274,6 +274,16 @@ impl ChatManager {
         if !group_members.contains(&inviter_id) {
             return Err("You are not a member of this group".to_string());
         }
+
+        // Verifica che l'inviter sia admin del gruppo
+        let is_admin = match self.db_manager.is_user_group_admin(inviter_id, group_id).await {
+            Ok(admin_status) => admin_status,
+            Err(e) => return Err(format!("Failed to check admin status: {}", e)),
+        };
+
+        if !is_admin {
+            return Err("Only group administrators can send invites".to_string());
+        }
         
         if group_members.contains(&target_user.id) {
             return Err("User is already a member of this group".to_string());

@@ -812,10 +812,19 @@ impl Application for ChatApp {
             Message::AcceptSpecificInvite(invite_id) => {
                 if matches!(self.connection_state, ConnectionState::Registered) {
                     if let Some(connection) = &self.persistent_connection {
+                        // Chiudi la sezione inviti dopo aver accettato
+                        self.invites_expanded = false;
+                        
                         // Converted to alert system
                         let conn = connection.clone();
                         let command = format!("/accept_invite {}", invite_id);
-                        Command::perform(
+                        
+                        let alert_command = Command::perform(async {}, |_| Message::ShowAlert(
+                            "Accepting invite...".to_string(),
+                            AlertType::Info
+                        ));
+                        
+                        let send_command = Command::perform(
                             Self::send_command_persistent(conn, command),
                             |result| match result {
                                 Ok(response) => {
@@ -823,7 +832,9 @@ impl Application for ChatApp {
                                 }
                                 Err(e) => Message::ServerMessage(format!("Error: {}", e))
                             }
-                        )
+                        );
+                        
+                        Command::batch(vec![alert_command, send_command])
                     } else {
                         // Converted to alert system
                         Command::none()
@@ -837,10 +848,19 @@ impl Application for ChatApp {
             Message::RejectSpecificInvite(invite_id) => {
                 if matches!(self.connection_state, ConnectionState::Registered) {
                     if let Some(connection) = &self.persistent_connection {
+                        // Chiudi la sezione inviti dopo aver rifiutato
+                        self.invites_expanded = false;
+                        
                         // Converted to alert system
                         let conn = connection.clone();
                         let command = format!("/reject_invite {}", invite_id);
-                        Command::perform(
+                        
+                        let alert_command = Command::perform(async {}, |_| Message::ShowAlert(
+                            "Rejecting invite...".to_string(),
+                            AlertType::Info
+                        ));
+                        
+                        let send_command = Command::perform(
                             Self::send_command_persistent(conn, command),
                             |result| match result {
                                 Ok(response) => {
@@ -848,7 +868,9 @@ impl Application for ChatApp {
                                 }
                                 Err(e) => Message::ServerMessage(format!("Error: {}", e))
                             }
-                        )
+                        );
+                        
+                        Command::batch(vec![alert_command, send_command])
                     } else {
                         // Converted to alert system
                         Command::none()

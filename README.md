@@ -99,5 +99,4 @@ input area non c'è
 fare login
 trigger per messaggi effimeri
 richieste di amicizia
-solo admin può inviare inviti
 correggere la ricerca del group id 

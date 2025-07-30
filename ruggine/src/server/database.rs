@@ -639,4 +639,20 @@ impl DatabaseManager {
         info!("Reset all users to offline status");
         Ok(())
     }
+
+    /// Check if a user is an admin of a specific group
+    pub async fn is_user_group_admin(&self, user_id: Uuid, group_id: Uuid) -> Result<bool> {
+        let result: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM group_members WHERE user_id = ? AND group_id = ?"
+        )
+        .bind(user_id.to_string())
+        .bind(group_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match result {
+            Some(role) => Ok(role == "admin"),
+            None => Ok(false), // User is not a member of the group
+        }
+    }
 }
