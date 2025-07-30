@@ -92,14 +92,14 @@ pub enum Message {
     HideGroupsSubsections,
     
     // Azioni specifiche su elementi delle liste
-    LeaveSpecificGroup(String),
+    LeaveSpecificGroup(String), // group_id
     AcceptSpecificInvite(String),
-    InviteToSpecificGroup(String), // Nuovo: invita a un gruppo specifico
-    ShowInviteFormForGroup(String), // Nuovo: mostra form invito per gruppo
+    InviteToSpecificGroup(String), // group_id - usa l'ID del gruppo
+    ShowInviteFormForGroup(String), // group_id - usa l'ID del gruppo
     
     // Gestione lista utenti per inviti 
-    ShowUsersListForGroup(String), // Mostra lista utenti per invitare al gruppo
-    InviteUserToGroup(String, String), // (username, group_name)
+    ShowUsersListForGroup(String), // group_id - usa l'ID del gruppo
+    InviteUserToGroup(String, String), // (username, group_id)
     HideUsersListForGroup, // Nascondi lista utenti
     
     // Gestione form di invito per gruppo specifico
@@ -109,7 +109,7 @@ pub enum Message {
     RejectSpecificInvite(String),
     
     // Aggiornamento delle liste
-    GroupsListUpdated(Vec<String>),
+    GroupsListUpdated(Vec<(String, String)>), // (group_id, group_name)
     InvitesListUpdated(Vec<(String, String)>),
     UsersListUpdated(Vec<String>), // Lista utenti per inviti
     
@@ -183,14 +183,14 @@ pub struct ChatApp {
     groups_create_view: bool,
     
     // Dati delle liste
-    my_groups: Vec<String>,
+    my_groups: Vec<(String, String)>, // (group_id, group_name)
     my_invites: Vec<(String, String)>, // (invite_id, group_name)
     available_users: Vec<String>, // Lista utenti disponibili per inviti
     
     // Gestione form di invito per gruppo specifico
-    invite_form_group: Option<String>, // Gruppo per cui è aperto il form di invito
+    invite_form_group: Option<String>, // Group ID per cui è aperto il form di invito
     invite_to_group_username: String,  // Username da invitare nel form specifico
-    users_list_for_group: Option<String>, // Gruppo per cui è aperta la lista utenti
+    users_list_for_group: Option<String>, // Group ID per cui è aperta la lista utenti
     
     // Configurazione
     config: Option<ClientConfig>,
@@ -783,12 +783,12 @@ impl Application for ChatApp {
                 Command::none()
             }
             
-            Message::LeaveSpecificGroup(group_name) => {
+            Message::LeaveSpecificGroup(group_id) => {
                 if matches!(self.connection_state, ConnectionState::Registered) {
                     if let Some(connection) = &self.persistent_connection {
                         // Converted to alert system
                         let conn = connection.clone();
-                        let command = format!("/leave_group {}", group_name);
+                        let command = format!("/leave_group_by_id {}", group_id);
                         Command::perform(
                             Self::send_command_persistent(conn, command),
                             |result| match result {
@@ -900,9 +900,9 @@ impl Application for ChatApp {
             }
             
             // Gestione lista utenti per inviti a gruppi
-            Message::ShowUsersListForGroup(group_name) => {
+            Message::ShowUsersListForGroup(group_id) => {
                 // Mostra la lista degli utenti per invitare al gruppo
-                self.users_list_for_group = Some(group_name);
+                self.users_list_for_group = Some(group_id);
                 self.invite_form_group = None; // Chiudi il form se era aperto
                 
                 // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
@@ -929,8 +929,8 @@ impl Application for ChatApp {
                 }
             }
             
-            Message::InviteUserToGroup(username, group_name) => {
-                // Invia l'invito direttamente
+            Message::InviteUserToGroup(username, group_id) => {
+                // Invia l'invito direttamente usando l'ID del gruppo
                 if matches!(self.connection_state, ConnectionState::Registered) {
                     if let Some(connection) = &self.persistent_connection {
                         // Nascondi la lista degli utenti dopo aver inviato l'invito
@@ -938,10 +938,10 @@ impl Application for ChatApp {
                         
                         // Converted to alert system
                         let conn = connection.clone();
-                        let command = format!("/invite {} {}", username, group_name);
+                        let command = format!("/invite_by_id {} {}", username, group_id);
                         
                         let alert_command = Command::perform(async {}, move |_| Message::ShowAlert(
-                            format!("Inviting {} to group {}...", username, group_name),
+                            format!("Inviting {} to group (ID: {})...", username, group_id),
                             AlertType::Info
                         ));
                         
@@ -971,16 +971,16 @@ impl Application for ChatApp {
             }
             
             // Nuovi casi per la gestione degli inviti per gruppo specifico
-            Message::InviteToSpecificGroup(group_name) => {
-                // Mostra il form di invito per il gruppo specifico
-                self.invite_form_group = Some(group_name);
+            Message::InviteToSpecificGroup(group_id) => {
+                // Mostra il form di invito per il gruppo specifico (ora usa ID)
+                self.invite_form_group = Some(group_id);
                 self.invite_to_group_username.clear();
                 Command::none()
             }
             
-            Message::ShowInviteFormForGroup(group_name) => {
-                // Mostra direttamente la lista degli utenti invece del form
-                self.users_list_for_group = Some(group_name);
+            Message::ShowInviteFormForGroup(group_id) => {
+                // Mostra direttamente la lista degli utenti invece del form (ora usa ID)
+                self.users_list_for_group = Some(group_id);
                 self.invite_form_group = None;
                 
                 // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
@@ -1014,16 +1014,16 @@ impl Application for ChatApp {
             }
             
             Message::SendInviteToGroup => {
-                // Invia l'invito al gruppo specifico
+                // Invia l'invito al gruppo specifico usando l'ID
                 if matches!(self.connection_state, ConnectionState::Registered) {
-                    if let Some(group_name) = &self.invite_form_group {
+                    if let Some(group_id) = &self.invite_form_group {
                         let username = self.invite_to_group_username.clone();
                         
                         if !username.is_empty() {
                             if let Some(connection) = &self.persistent_connection {
                                 // Converted to alert system
                                 let conn = connection.clone();
-                                let command = format!("/invite {} {}", username, group_name);
+                                let command = format!("/invite_by_id {} {}", username, group_id);
                                 
                                 // Chiudi il form dopo aver inviato l'invito
                                 self.invite_form_group = None;
@@ -1260,15 +1260,15 @@ impl ChatApp {
                         column(
                             self.my_groups
                                 .iter()
-                                .map(|group| {
+                                .map(|(group_id, group_name)| {
                                     row![
-                                        text(format!("👥 {}", group)).width(Length::Fill).font(EMOJI_FONT),
+                                        text(format!("👥 {}", group_name)).width(Length::Fill).font(EMOJI_FONT),
                                         button(text("➕").font(EMOJI_FONT))
-                                            .on_press(Message::ShowInviteFormForGroup(group.clone()))
+                                            .on_press(Message::ShowInviteFormForGroup(group_id.clone()))
                                             .padding(5)
                                             .width(Length::Fixed(35.0)),
                                         button(text("❌ Leave").font(EMOJI_FONT))
-                                            .on_press(Message::LeaveSpecificGroup(group.clone()))
+                                            .on_press(Message::LeaveSpecificGroup(group_id.clone()))
                                             .padding(5)
                                             .width(Length::Fixed(80.0)),
                                     ].spacing(10)
@@ -1632,24 +1632,34 @@ impl ChatApp {
     }
     
     // Helper functions per parsare le risposte del server
-    fn parse_groups_response(response: &str) -> Vec<String> {
-        // Esempi di risposta: 
-        // - "OK: Your groups: gruppo1, gruppo2, gruppo3"
-        // - "OK: You are not in any groups"
+    fn parse_groups_response(response: &str) -> Vec<(String, String)> {
+        // Nuovo formato della risposta:
+        // "OK: Your groups:\n  ID: uuid1 | Name: 'gruppo1'\n  ID: uuid2 | Name: 'gruppo2'"
+        // oppure
+        // "OK: You are not in any groups"
         if response.starts_with("OK:") {
             if response.contains("You are not in any groups") {
                 return Vec::new();
             } else if response.contains("Your groups:") {
-                let groups_part = response.split("Your groups:").nth(1).unwrap_or("").trim();
-                if groups_part.is_empty() {
-                    Vec::new()
-                } else {
-                    groups_part
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
+                let mut groups = Vec::new();
+                
+                // Dividi per righe e cerca quelle che iniziano con "  ID:"
+                for line in response.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("ID:") {
+                        // Parse: "ID: uuid | Name: 'group_name'"
+                        let parts: Vec<&str> = trimmed.split(" | ").collect();
+                        if parts.len() == 2 {
+                            if let Some(id_part) = parts[0].strip_prefix("ID: ") {
+                                if let Some(name_part) = parts[1].strip_prefix("Name: '").and_then(|s| s.strip_suffix("'")) {
+                                    groups.push((id_part.to_string(), name_part.to_string()));
+                                }
+                            }
+                        }
+                    }
                 }
+                
+                groups
             } else {
                 Vec::new()
             }

@@ -164,12 +164,15 @@ async fn process_command(
                 return Ok(());
             }
             
-            let groups = chat_manager.get_user_groups(user_id.unwrap()).await;
-            if groups.is_empty() {
+            let groups_with_id = chat_manager.get_user_groups_with_id(user_id.unwrap()).await;
+            if groups_with_id.is_empty() {
                 send_success(writer, "You are not in any groups").await?;
             } else {
-                let group_list = groups.join(", ");
-                send_success(writer, &format!("Your groups: {}", group_list)).await?;
+                let mut response = String::from("Your groups:\n");
+                for (group_id, group_name) in groups_with_id {
+                    response.push_str(&format!("  ID: {} | Name: '{}'\n", group_id, group_name));
+                }
+                send_success(writer, &response.trim()).await?;
             }
         }
         "/invite" => {
@@ -188,6 +191,36 @@ async fn process_command(
             match chat_manager.invite_to_group(user_id.unwrap(), target_username.clone(), group_name.clone()).await {
                 Ok(invite_id) => {
                     send_success(writer, &format!("Invitation sent to {} for group '{}' (ID: {})", target_username, group_name, invite_id)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to send invite: {}", e)).await?;
+                }
+            }
+        }
+        "/invite_by_id" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 3 {
+                send_error(writer, "Usage: /invite_by_id <username> <group_id>").await?;
+                return Ok(());
+            }
+            
+            let target_username = parts[1].to_string();
+            let group_id_str = parts[2];
+            
+            let group_id = match uuid::Uuid::parse_str(group_id_str) {
+                Ok(id) => id,
+                Err(_) => {
+                    send_error(writer, "Invalid group ID format").await?;
+                    return Ok(());
+                }
+            };
+            
+            match chat_manager.invite_to_group_by_id(user_id.unwrap(), target_username.clone(), group_id).await {
+                Ok(invite_id) => {
+                    send_success(writer, &format!("Invitation sent to {} for group ID {} (Invite ID: {})", target_username, group_id, invite_id)).await?;
                 }
                 Err(e) => {
                     send_error(writer, &format!("Failed to send invite: {}", e)).await?;
@@ -318,6 +351,34 @@ async fn process_command(
             
             let group_name = parts[1];
             match chat_manager.leave_group(user_id.unwrap(), group_name.to_string()).await {
+                Ok(message) => {
+                    send_success(writer, &message).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to leave group: {}", e)).await?;
+                }
+            }
+        }
+        "/leave_group_by_id" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /leave_group_by_id <group_id>").await?;
+                return Ok(());
+            }
+            
+            let group_id_str = parts[1];
+            let group_id = match uuid::Uuid::parse_str(group_id_str) {
+                Ok(id) => id,
+                Err(_) => {
+                    send_error(writer, "Invalid group ID format").await?;
+                    return Ok(());
+                }
+            };
+            
+            match chat_manager.leave_group_by_id(user_id.unwrap(), group_id).await {
                 Ok(message) => {
                     send_success(writer, &message).await?;
                 }

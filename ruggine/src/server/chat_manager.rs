@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use log::{info, warn, error};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::{Utc, Duration};
 use crate::server::database::DatabaseManager;
 
 // Import dei modelli comuni
@@ -241,6 +242,22 @@ impl ChatManager {
                 groups.values()
                     .filter(|group| group.members.contains(&user_id))
                     .map(|group| group.name.clone())
+                    .collect()
+            }
+        }
+    }
+
+    /// Ottieni gruppi dell'utente con ID e nome (per il nuovo sistema)
+    pub async fn get_user_groups_with_id(&self, user_id: Uuid) -> Vec<(Uuid, String)> {
+        match self.db_manager.get_user_groups(user_id).await {
+            Ok(groups) => groups.into_iter().map(|group| (group.id, group.name)).collect(),
+            Err(e) => {
+                warn!("Failed to get user groups from database: {}", e);
+                // Fallback alla cache in memoria
+                let groups = self.groups.read().await;
+                groups.values()
+                    .filter(|group| group.members.contains(&user_id))
+                    .map(|group| (group.id, group.name.clone()))
                     .collect()
             }
         }
@@ -520,7 +537,7 @@ impl ChatManager {
         }
     }
 
-    /// Lascia un gruppo
+    /// Lascia un gruppo (versione originale che usa nome - deprecata)
     pub async fn leave_group(&self, user_id: Uuid, group_name: String) -> Result<String, String> {
         // Trova il gruppo per nome
         let group_id = {
@@ -529,13 +546,92 @@ impl ChatManager {
                 .ok_or_else(|| "Group not found".to_string())?
         };
 
+        self.leave_group_by_id(user_id, group_id).await
+    }
+
+    /// Lascia un gruppo usando l'ID (nuovo metodo sicuro)
+    pub async fn leave_group_by_id(&self, user_id: Uuid, group_id: Uuid) -> Result<String, String> {
+        // Ottieni il nome del gruppo per la risposta
+        let group_name = match self.db_manager.get_group_by_id(group_id).await {
+            Ok(Some(group)) => group.name,
+            Ok(None) => return Err("Group not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
+        };
+
         // Rimuovi l'utente dal gruppo nel database
         if let Err(e) = self.db_manager.remove_user_from_group(group_id, user_id).await {
             return Err(format!("Failed to leave group: {}", e));
         }
 
-        info!("User {} left group '{}'", user_id, group_name);
+        info!("User {} left group '{}' (ID: {})", user_id, group_name, group_id);
         Ok(format!("Left group '{}'", group_name))
+    }
+
+    /// Invita un utente a un gruppo usando l'ID (nuovo metodo sicuro)
+    pub async fn invite_to_group_by_id(&self, inviter_id: Uuid, target_username: String, group_id: Uuid) -> Result<Uuid, String> {
+        // Trova l'utente target nel database
+        let target_user = match self.db_manager.get_user_by_username(&target_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err("User not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
+        };
+
+        // Ottieni informazioni sul gruppo
+        let group = match self.db_manager.get_group_by_id(group_id).await {
+            Ok(Some(group)) => group,
+            Ok(None) => return Err("Group not found".to_string()),
+            Err(e) => return Err(format!("Database error: {}", e)),
+        };
+
+        // Verifica che l'inviter sia membro del gruppo
+        let group_members = match self.db_manager.get_group_members(group_id).await {
+            Ok(members) => members,
+            Err(e) => return Err(format!("Failed to get group members: {}", e)),
+        };
+
+        if !group_members.contains(&inviter_id) {
+            return Err("You are not a member of this group".to_string());
+        }
+
+        // Verifica permessi admin se necessario
+        let is_admin = match self.db_manager.is_user_group_admin(inviter_id, group_id).await {
+            Ok(is_admin) => is_admin,
+            Err(e) => return Err(format!("Failed to check admin status: {}", e)),
+        };
+
+        if !is_admin {
+            return Err("Only group admins can send invites".to_string());
+        }
+
+        // Verifica che l'utente target non sia già membro
+        if group_members.contains(&target_user.id) {
+            return Err("User is already a member of this group".to_string());
+        }
+
+        let invite = GroupInvite {
+            id: Uuid::new_v4(),
+            group_id,
+            inviter_id,
+            invitee_id: target_user.id,
+            created_at: Utc::now(),
+            expires_at: Some(Utc::now() + Duration::hours(24)), // Invito valido per 24 ore
+            status: InviteStatus::Pending,
+            responded_at: None,
+        };
+
+        // Salva l'invito nel database
+        if let Err(e) = self.db_manager.create_group_invite(&invite).await {
+            return Err(format!("Failed to create invite: {}", e));
+        }
+
+        // Aggiungi l'invito alla cache in memoria
+        {
+            let mut invites = self.invites.write().await;
+            invites.insert(invite.id, invite.clone());
+        }
+
+        info!("Invite sent: {} invited {} to group {} (ID: {})", inviter_id, target_username, group.name, group_id);
+        Ok(invite.id)
     }
 
     /// Funzione di compatibilità temporanea per inviare messaggi di gruppo (da rimuovere)

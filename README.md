@@ -99,4 +99,3 @@ input area non c'è
 fare login
 trigger per messaggi effimeri
 richieste di amicizia
-correggere la ricerca del group id 
