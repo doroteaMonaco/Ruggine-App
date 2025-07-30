@@ -113,6 +113,12 @@ pub enum Message {
     InvitesListUpdated(Vec<(String, String)>),
     UsersListUpdated(Vec<String>), // Lista utenti per inviti
     
+    // Chat private
+    StartPrivateChat(String), // username
+    ClosePrivateChat,
+    PrivateChatInputChanged(String),
+    SendPrivateMessage,
+    
     // Sistema di alert
     ShowAlert(String, AlertType),
     HideAlert,
@@ -139,6 +145,8 @@ pub struct Alert {
 pub enum AppState {
     Registration,  // Schermata iniziale per connessione e registrazione
     MainActions,   // Schermata principale con tutte le azioni
+    Chat,          // Vista chat generale
+    PrivateChat(String), // Chat privata con un utente specifico
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +200,11 @@ pub struct ChatApp {
     invite_to_group_username: String,  // Username da invitare nel form specifico
     users_list_for_group: Option<String>, // Group ID per cui è aperta la lista utenti
     
+    // Chat privata
+    private_chat_target: Option<String>, // Username del destinatario della chat privata
+    private_chat_input: String,          // Testo del messaggio privato
+    private_messages: std::collections::HashMap<String, Vec<String>>, // Cronologia messaggi per utente
+    
     // Configurazione
     config: Option<ClientConfig>,
 }
@@ -238,6 +251,9 @@ impl Application for ChatApp {
                 invite_form_group: None,
                 invite_to_group_username: String::new(),
                 users_list_for_group: None,
+                private_chat_target: None,
+                private_chat_input: String::new(),
+                private_messages: std::collections::HashMap::new(),
                 config,
             },
             Command::none(),
@@ -412,9 +428,13 @@ impl Application for ChatApp {
                             AlertType::Info
                         ));
                         let send_command = Command::perform(
-                            Self::send_command_persistent(conn, "/users".to_string()),
+                            Self::send_command_persistent(conn, "/all_users".to_string()),
                             |result| match result {
-                                Ok(response) => Message::ServerMessage(format!("[Users] {}", response)),
+                                Ok(response) => {
+                                    // Parsa gli utenti e aggiorna la lista
+                                    let users = Self::parse_users_response(&response);
+                                    Message::UsersListUpdated(users)
+                                },
                                 Err(e) => Message::ServerMessage(format!("Error: {}", e))
                             }
                         );
@@ -899,6 +919,55 @@ impl Application for ChatApp {
                 Command::none()
             }
             
+            // Chat private
+            Message::StartPrivateChat(username) => {
+                self.private_chat_target = Some(username.clone());
+                self.app_state = AppState::PrivateChat(username);
+                self.private_chat_input.clear();
+                Command::none()
+            }
+            
+            Message::ClosePrivateChat => {
+                self.private_chat_target = None;
+                self.app_state = AppState::Chat;
+                self.private_chat_input.clear();
+                Command::none()
+            }
+            
+            Message::PrivateChatInputChanged(input) => {
+                self.private_chat_input = input;
+                Command::none()
+            }
+            
+            Message::SendPrivateMessage => {
+                if let Some(target_user) = &self.private_chat_target {
+                    if !self.private_chat_input.trim().is_empty() {
+                        if let Some(connection) = &self.persistent_connection {
+                            let conn = connection.clone();
+                            let message = format!("/private {} {}", target_user, self.private_chat_input);
+                            let sent_message = format!("You: {}", self.private_chat_input);
+                            
+                            // Aggiungi il messaggio alla cronologia locale
+                            self.private_messages
+                                .entry(target_user.clone())
+                                .or_insert_with(Vec::new)
+                                .push(sent_message);
+                            
+                            self.private_chat_input.clear();
+                            
+                            return Command::perform(
+                                Self::send_command_persistent(conn, message),
+                                |result| match result {
+                                    Ok(_) => Message::ShowAlert("Message sent".to_string(), AlertType::Success),
+                                    Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                                }
+                            );
+                        }
+                    }
+                }
+                Command::none()
+            }
+            
             // Gestione lista utenti per inviti a gruppi
             Message::ShowUsersListForGroup(group_id) => {
                 // Mostra la lista degli utenti per invitare al gruppo
@@ -1087,6 +1156,8 @@ impl Application for ChatApp {
         match self.app_state {
             AppState::Registration => self.view_registration(),
             AppState::MainActions => self.view_main_actions(),
+            AppState::Chat => self.view_main_actions(), // Per ora usa la stessa vista
+            AppState::PrivateChat(ref username) => self.view_private_chat(username),
         }
     }
 }
@@ -1221,6 +1292,31 @@ impl ChatApp {
                 .on_press(Message::ListUsersPressed)
                 .padding(5),
         ].spacing(5);
+        
+        // Aggiungi la lista degli utenti con bottoni chat (solo se non siamo nel contesto di inviti)
+        let mut users_section = users_section;
+        if self.users_list_for_group.is_none() && !self.available_users.is_empty() {
+            let users_list_section = column![
+                text("💬 Start Private Chat:").size(14).font(BOLD_FONT),
+                column(
+                    self.available_users
+                        .iter()
+                        .map(|user| {
+                            row![
+                                text(format!("👤 {}", user)).width(Length::Fill).font(EMOJI_FONT),
+                                button(text("💬 Chat").font(EMOJI_FONT))
+                                    .on_press(Message::StartPrivateChat(user.clone()))
+                                    .padding(5)
+                                    .width(Length::Fixed(80.0)),
+                            ].spacing(10)
+                            .align_items(iced::Alignment::Center)
+                            .into()
+                        })
+                        .collect::<Vec<_>>()
+                ).spacing(5),
+            ].spacing(10);
+            users_section = users_section.push(users_list_section);
+        }
 
         // Sezione Groups con toggle
         let groups_section_header = row![
@@ -1749,6 +1845,68 @@ impl ChatApp {
         } else {
             Vec::new()
         }
+    }
+    
+    fn view_private_chat(&self, username: &str) -> Element<Message> {
+        use iced::widget::{button, column, container, row, text, text_input, scrollable};
+        use iced::{Alignment, Element, Length, Color};
+        
+        let empty_messages = Vec::new();
+        let messages = self.private_messages.get(username).unwrap_or(&empty_messages);
+        
+        let messages_area = if messages.is_empty() {
+            column![
+                text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
+                text("No messages yet. Start the conversation!").size(14),
+            ].spacing(10)
+        } else {
+            let message_widgets: Vec<Element<Message>> = messages
+                .iter()
+                .map(|msg| {
+                    let color = if msg.starts_with("You: ") {
+                        Color::from_rgb(0.0, 0.7, 0.0) // Verde per i tuoi messaggi
+                    } else {
+                        Color::from_rgb(0.0, 0.5, 1.0) // Blu per i messaggi ricevuti
+                    };
+                    text(msg).style(color).size(14).into()
+                })
+                .collect();
+                
+            column![
+                text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
+                scrollable(
+                    column(message_widgets)
+                        .spacing(5)
+                        .padding(10)
+                ).height(Length::Fixed(300.0))
+            ].spacing(10)
+        };
+        
+        let input_section = row![
+            text_input("Type your message...", &self.private_chat_input)
+                .on_input(Message::PrivateChatInputChanged)
+                .on_submit(Message::SendPrivateMessage)
+                .padding(5)
+                .width(Length::Fill),
+            button(text("📤 Send").font(EMOJI_FONT))
+                .on_press(Message::SendPrivateMessage)
+                .padding(5),
+        ].spacing(10).align_items(Alignment::Center);
+        
+        let back_button = button(text("⬅️ Back to Main").font(EMOJI_FONT))
+            .on_press(Message::ClosePrivateChat)
+            .padding(5);
+        
+        container(
+            column![
+                back_button,
+                messages_area,
+                input_section,
+            ].spacing(20).padding(20)
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 }
 

@@ -56,6 +56,7 @@ async fn send_help(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>) -> Re
 /leave_group <group_name> - Leave a group
 /send <group_name> <message> - Send message to group
 /send_private <username> <message> - Send private message
+/private <username> <message> - Send private message (alternative)
 /save                    - Save server data to file (admin only)
 /help                    - Show this help
 /quit                    - Disconnect
@@ -64,6 +65,7 @@ Example usage:
   /create_group friends
   /invite alice friends
   /send friends Hello everyone!
+  /private alice Hi there!
 "#;
     writer.write_all(help_msg.as_bytes()).await?;
     writer.flush().await?;
@@ -384,6 +386,28 @@ async fn process_command(
                 }
                 Err(e) => {
                     send_error(writer, &format!("Failed to leave group: {}", e)).await?;
+                }
+            }
+        }
+        "/private" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() < 3 {
+                send_error(writer, "Usage: /private <username> <message>").await?;
+                return Ok(());
+            }
+            
+            let target_username = parts[1].to_string();
+            let message = parts[2..].join(" ");
+            
+            match chat_manager.send_private_message(user_id.unwrap(), target_username, message).await {
+                Ok(_) => {
+                    send_success(writer, "Private message sent").await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to send private message: {}", e)).await?;
                 }
             }
         }
