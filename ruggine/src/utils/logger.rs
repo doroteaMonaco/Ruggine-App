@@ -1,5 +1,5 @@
 use chrono::Utc;
-use log::{info, warn, error};
+use log::info;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;

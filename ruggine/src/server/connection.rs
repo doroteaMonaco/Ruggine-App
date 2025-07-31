@@ -1,9 +1,10 @@
-use crate::server::chat_manager::ChatManager;
-use log::{info, warn, error, debug};
+use crate::server::chat_manager::{ChatManager, ClientNotification};
+use log::{info, error, debug};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub struct ClientConnection {
@@ -13,7 +14,7 @@ pub struct ClientConnection {
     username: Option<String>,
 }
 
-async fn send_welcome(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn send_welcome(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let welcome_msg = r#"
 === Welcome to Ruggine Chat Server ===
 Commands:
@@ -28,19 +29,19 @@ Please register first: /register <your_username>
     Ok(())
 }
 
-async fn send_success(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn send_success(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     writer.write_all(format!("OK: {}\n", message).as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
 
-async fn send_error(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn send_error(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     writer.write_all(format!("ERROR: {}\n", message).as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
 
-async fn send_help(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn send_help(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let help_msg = r#"
 === Ruggine Chat Commands ===
 /register <username>     - Register with a username
@@ -57,6 +58,8 @@ async fn send_help(writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>) -> Re
 /send <group_name> <message> - Send message to group
 /send_private <username> <message> - Send private message
 /private <username> <message> - Send private message (alternative)
+/delete_group_messages <group_id> - Delete all messages from a group chat
+/delete_private_messages <username> - Delete all messages from a private chat
 /save                    - Save server data to file (admin only)
 /help                    - Show this help
 /quit                    - Disconnect
@@ -66,6 +69,8 @@ Example usage:
   /invite alice friends
   /send friends Hello everyone!
   /private alice Hi there!
+  /delete_group_messages <group_id>
+  /delete_private_messages alice
 "#;
     writer.write_all(help_msg.as_bytes()).await?;
     writer.flush().await?;
@@ -75,10 +80,11 @@ Example usage:
 async fn process_command(
     command: &str,
     chat_manager: &Arc<ChatManager>,
-    writer: &mut BufWriter<tokio::net::tcp::WriteHalf<'_>>,
+    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
     addr: SocketAddr,
     user_id: &mut Option<Uuid>,
     username: &mut Option<String>,
+    notification_tx: &mpsc::UnboundedSender<ClientNotification>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     
@@ -98,6 +104,10 @@ async fn process_command(
                 Ok(new_user_id) => {
                     *user_id = Some(new_user_id);
                     *username = Some(new_username.clone());
+                    
+                    // Registra il canale di notifica per questo utente
+                    chat_manager.register_notification_channel(new_user_id, notification_tx.clone()).await;
+                    
                     send_success(writer, &format!("Registered as: {}", new_username)).await?;
                     info!("User {} registered from {}", new_username, addr);
                 }
@@ -411,6 +421,103 @@ async fn process_command(
                 }
             }
         }
+        "/delete_group_messages" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /delete_group_messages <group_id>").await?;
+                return Ok(());
+            }
+
+            let group_id_str = parts[1];
+            let group_id = match uuid::Uuid::parse_str(group_id_str) {
+                Ok(id) => id,
+                Err(_) => {
+                    send_error(writer, "Invalid group ID format").await?;
+                    return Ok(());
+                }
+            };
+
+            match chat_manager.delete_group_messages(user_id.unwrap(), group_id).await {
+                Ok(deleted_count) => {
+                    send_success(writer, &format!("Deleted {} messages from group", deleted_count)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to delete group messages: {}", e)).await?;
+                }
+            }
+        }
+        "/delete_private_messages" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /delete_private_messages <username>").await?;
+                return Ok(());
+            }
+
+            let target_username = parts[1].to_string();
+            
+            // Trova l'utente target
+            let target_user_id = match chat_manager.get_user_id_by_username(&target_username).await {
+                Some(id) => id,
+                None => {
+                    send_error(writer, &format!("User '{}' not found", target_username)).await?;
+                    return Ok(());
+                }
+            };
+
+            match chat_manager.delete_private_messages(user_id.unwrap(), target_user_id).await {
+                Ok(deleted_count) => {
+                    send_success(writer, &format!("Deleted {} private messages with {}", deleted_count, target_username)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to delete private messages: {}", e)).await?;
+                }
+            }
+        }
+        "/get_private_messages" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /get_private_messages <username>").await?;
+                return Ok(());
+            }
+
+            let target_username = parts[1].to_string();
+            
+            // Trova l'utente target
+            let target_user_id = match chat_manager.get_user_id_by_username(&target_username).await {
+                Some(id) => id,
+                None => {
+                    send_error(writer, &format!("User '{}' not found", target_username)).await?;
+                    return Ok(());
+                }
+            };
+
+            // Ottieni messaggi dal database
+            match chat_manager.get_decrypted_direct_messages(user_id.unwrap(), target_user_id, 50).await {
+                Ok(messages) => {
+                    if messages.is_empty() {
+                        send_success(writer, "No messages found").await?;
+                    } else {
+                        let mut response = String::from("Private messages:\n");
+                        for msg in messages {
+                            response.push_str(&format!("{}\n", msg));
+                        }
+                        send_success(writer, &response.trim()).await?;
+                    }
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to get private messages: {}", e)).await?;
+                }
+            }
+        }
         cmd if cmd.starts_with('/') => {
             send_error(writer, &format!("Unknown command: {}", cmd)).await?;
         }
@@ -437,13 +544,17 @@ impl ClientConnection {
         }
     }
     
-    pub async fn handle(mut self, chat_manager: Arc<ChatManager>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn handle(self, chat_manager: Arc<ChatManager>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let addr = self.addr;
         info!("Handling client connection from {}", addr);
         
-        let (reader, writer) = self.stream.split();
+        // Dividiamo lo stream in reader e writer
+        let (reader, writer) = self.stream.into_split();
         let mut buf_reader = BufReader::new(reader);
         let mut buf_writer = BufWriter::new(writer);
+        
+        // Crea un canale per le notifiche
+        let (notification_tx, mut notification_rx) = mpsc::unbounded_channel::<ClientNotification>();
         
         // Invia messaggio di benvenuto
         send_welcome(&mut buf_writer).await?;
@@ -451,6 +562,39 @@ impl ClientConnection {
         // Variabili per tracciare lo stato del client
         let mut user_id: Option<Uuid> = None;
         let mut username: Option<String> = None;
+        
+        // Task per gestire le notifiche in entrata
+        let buf_writer = Arc::new(tokio::sync::Mutex::new(buf_writer));
+        let buf_writer_for_notifications = Arc::clone(&buf_writer);
+        let notification_task = tokio::spawn(async move {
+            while let Some(notification) = notification_rx.recv().await {
+                let mut writer = buf_writer_for_notifications.lock().await;
+                match notification {
+                    ClientNotification::NewPrivateMessage { from_username, .. } => {
+                        let notification_msg = format!("NOTIFICATION:PRIVATE_MESSAGE:{}\n", from_username);
+                        if let Err(e) = writer.write_all(notification_msg.as_bytes()).await {
+                            error!("Failed to send private message notification: {}", e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("Failed to flush notification: {}", e);
+                            break;
+                        }
+                    }
+                    ClientNotification::NewGroupMessage { group_name, from_username, .. } => {
+                        let notification_msg = format!("NOTIFICATION:GROUP_MESSAGE:{}:{}\n", group_name, from_username);
+                        if let Err(e) = writer.write_all(notification_msg.as_bytes()).await {
+                            error!("Failed to send group message notification: {}", e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("Failed to flush notification: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         
         // Loop principale per leggere comandi
         let mut line = String::new();
@@ -471,13 +615,16 @@ impl ClientConnection {
                     
                     debug!("Received from {}: {}", addr, trimmed);
                     
-                    if let Err(e) = process_command(trimmed, &chat_manager, &mut buf_writer, addr, &mut user_id, &mut username).await {
-                        if e.to_string() == "DISCONNECT_REQUESTED" {
-                            debug!("Client {} requested disconnect", addr);
-                            break;
-                        } else {
-                            error!("Error processing command from {}: {}", addr, e);
-                            send_error(&mut buf_writer, "Internal server error").await?;
+                    {
+                        let mut writer = buf_writer.lock().await;
+                        if let Err(e) = process_command(trimmed, &chat_manager, &mut *writer, addr, &mut user_id, &mut username, &notification_tx).await {
+                            if e.to_string() == "DISCONNECT_REQUESTED" {
+                                debug!("Client {} requested disconnect", addr);
+                                break;
+                            } else {
+                                error!("Error processing command from {}: {}", addr, e);
+                                send_error(&mut *writer, "Internal server error").await?;
+                            }
                         }
                     }
                 }
@@ -521,6 +668,9 @@ impl ClientConnection {
         if let Some(uid) = user_id {
             chat_manager.user_disconnected(uid).await;
         }
+        
+        // Termina il task di notifica
+        notification_task.abort();
         
         Ok(())
     }

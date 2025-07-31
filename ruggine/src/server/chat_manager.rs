@@ -7,6 +7,7 @@ use log::{info, warn, error};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Utc, Duration};
 use crate::server::database::DatabaseManager;
+use tokio::sync::mpsc;
 
 // Import dei modelli comuni
 use crate::common::models::{Group, GroupInvite, InviteStatus, MessageType, User};
@@ -21,6 +22,22 @@ pub struct ConnectedUser {
     pub connected_at: chrono::DateTime<chrono::Utc>,
 }
 
+// Struttura per gestire le notifiche ai client
+#[derive(Debug, Clone)]
+pub enum ClientNotification {
+    NewPrivateMessage {
+        from_username: String,
+        from_id: Uuid,
+        message: String,
+    },
+    NewGroupMessage {
+        group_name: String,
+        group_id: Uuid,
+        from_username: String,
+        from_id: Uuid,
+        message: String,
+    },
+}
 
 pub struct ChatManager {
     users: Arc<RwLock<HashMap<Uuid, ConnectedUser>>>,
@@ -31,6 +48,8 @@ pub struct ChatManager {
     encrypted_messages: Arc<RwLock<Vec<EncryptedMessage>>>, // All encrypted messages
     crypto_manager: Arc<RwLock<CryptoManager>>, // Crypto manager for encryption
     db_manager: Arc<DatabaseManager>, // Database manager
+    // Canali per inviare notifiche ai client
+    notification_senders: Arc<RwLock<HashMap<Uuid, mpsc::UnboundedSender<ClientNotification>>>>,
 }
 
 impl ChatManager {
@@ -44,6 +63,7 @@ impl ChatManager {
             encrypted_messages: Arc::new(RwLock::new(Vec::new())),
             crypto_manager: Arc::new(RwLock::new(CryptoManager::new())),
             db_manager,
+            notification_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -126,6 +146,12 @@ impl ChatManager {
         if let Err(e) = self.db_manager.update_user_online_status(user_id, false).await {
             warn!("Failed to update user offline status in database: {}", e);
         }
+
+        // Rimuovi il canale di notifica
+        {
+            let mut senders = self.notification_senders.write().await;
+            senders.remove(&user_id);
+        }
         
         // Rimuovi dalla gestione in memoria
         let mut users = self.users.write().await;
@@ -134,6 +160,27 @@ impl ChatManager {
         if let Some(user) = users.remove(&user_id) {
             usernames.remove(&user.username);
             info!("User disconnected: {} ({})", user.username, user_id);
+        }
+    }
+
+    /// Registra un canale di notifica per un utente
+    pub async fn register_notification_channel(&self, user_id: Uuid, sender: mpsc::UnboundedSender<ClientNotification>) {
+        let mut senders = self.notification_senders.write().await;
+        senders.insert(user_id, sender);
+        info!("Notification channel registered for user {}", user_id);
+    }
+
+    /// Invia una notifica a un utente specifico
+    pub async fn send_notification(&self, user_id: Uuid, notification: ClientNotification) {
+        let senders = self.notification_senders.read().await;
+        if let Some(sender) = senders.get(&user_id) {
+            if let Err(_) = sender.send(notification) {
+                warn!("Failed to send notification to user {}: channel closed", user_id);
+                // Il canale è chiuso, potremmo rimuoverlo qui
+                drop(senders);
+                let mut senders_mut = self.notification_senders.write().await;
+                senders_mut.remove(&user_id);
+            }
         }
     }
     
@@ -172,6 +219,22 @@ impl ChatManager {
     pub async fn get_username_by_id(&self, user_id: &Uuid) -> Option<String> {
         let users = self.users.read().await;
         users.get(user_id).map(|user| user.username.clone())
+    }
+
+    pub async fn get_user_id_by_username(&self, username: &str) -> Option<Uuid> {
+        // Prima cerca nei dati in memoria (utenti online)
+        {
+            let usernames = self.usernames.read().await;
+            if let Some(&user_id) = usernames.get(username) {
+                return Some(user_id);
+            }
+        }
+
+        // Se non trovato in memoria, cerca nel database
+        match self.db_manager.get_user_by_username(username).await {
+            Ok(Some(user)) => Some(user.id),
+            _ => None,
+        }
     }
 
     // === GROUP MANAGEMENT ===
@@ -372,12 +435,6 @@ impl ChatManager {
 
         let receiver_id = encrypted_msg.receiver_id.ok_or("No receiver specified")?;
 
-        // Verifica che l'utente destinatario esista
-        match self.db_manager.get_user_by_username("").await {
-            Ok(_) => {}, // Potremmo verificare l'esistenza dell'utente, ma per ora assumiamo che il receiver_id sia valido
-            Err(e) => return Err(format!("Database error: {}", e)),
-        }
-
         // Salva nel database
         if let Err(e) = self.db_manager.save_encrypted_message(&encrypted_msg).await {
             warn!("Failed to save encrypted private message to database: {}", e);
@@ -389,6 +446,27 @@ impl ChatManager {
             let mut messages = self.encrypted_messages.write().await;
             messages.push(encrypted_msg.clone());
         }
+
+        // Ottieni informazioni del mittente per la notifica
+        let sender_username = match self.get_username_by_id(&encrypted_msg.sender_id).await {
+            Some(username) => username,
+            None => {
+                // Se non è in memoria, cerca nel database
+                match self.db_manager.get_user_by_id(encrypted_msg.sender_id).await {
+                    Ok(Some(user)) => user.username,
+                    _ => "Unknown User".to_string(),
+                }
+            }
+        };
+
+        // Invia notifica al destinatario (se è online)
+        let notification = ClientNotification::NewPrivateMessage {
+            from_username: sender_username,
+            from_id: encrypted_msg.sender_id,
+            message: "New private message".to_string(), // Non possiamo decrittare il messaggio qui
+        };
+        
+        self.send_notification(receiver_id, notification).await;
 
         info!("Encrypted private message sent from {} to {}", encrypted_msg.sender_id, receiver_id);
         Ok(())
@@ -908,6 +986,58 @@ impl ChatManager {
                 let message_count = self.encrypted_messages.read().await.len();
                 (online_users_count, group_count, message_count)
             }
+        }
+    }
+
+    // === MESSAGE DELETION ===
+    /// Delete all messages from a group chat
+    pub async fn delete_group_messages(&self, user_id: Uuid, group_id: Uuid) -> Result<u64, String> {
+        // Verifica che l'utente sia membro del gruppo
+        match self.db_manager.is_user_in_group(user_id, group_id).await {
+            Ok(true) => {},
+            Ok(false) => return Err("You are not a member of this group".to_string()),
+            Err(e) => return Err(format!("Failed to verify group membership: {}", e)),
+        }
+
+        // Elimina i messaggi dal database
+        match self.db_manager.delete_group_messages(group_id, user_id).await {
+            Ok(deleted_count) => {
+                // Rimuovi anche dalla cache in memoria
+                {
+                    let mut messages = self.encrypted_messages.write().await;
+                    messages.retain(|msg| msg.group_id != Some(group_id));
+                }
+                
+                info!("User {} deleted {} messages from group {}", user_id, deleted_count, group_id);
+                Ok(deleted_count)
+            },
+            Err(e) => Err(format!("Failed to delete group messages: {}", e)),
+        }
+    }
+
+    /// Delete all messages from a private chat
+    pub async fn delete_private_messages(&self, user_id: Uuid, other_user_id: Uuid) -> Result<u64, String> {
+        // Elimina i messaggi dal database
+        match self.db_manager.delete_private_messages(user_id, other_user_id).await {
+            Ok(deleted_count) => {
+                // Rimuovi anche dalla cache in memoria
+                {
+                    let mut messages = self.encrypted_messages.write().await;
+                    messages.retain(|msg| {
+                        if msg.group_id.is_some() {
+                            return true; // Mantieni i messaggi di gruppo
+                        }
+                        
+                        // Rimuovi messaggi privati tra questi due utenti
+                        !((msg.sender_id == user_id && msg.receiver_id == Some(other_user_id)) ||
+                          (msg.sender_id == other_user_id && msg.receiver_id == Some(user_id)))
+                    });
+                }
+                
+                info!("User {} deleted {} private messages with user {}", user_id, deleted_count, other_user_id);
+                Ok(deleted_count)
+            },
+            Err(e) => Err(format!("Failed to delete private messages: {}", e)),
         }
     }
 }

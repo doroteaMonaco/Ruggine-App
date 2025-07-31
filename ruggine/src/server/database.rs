@@ -2,7 +2,7 @@ use sqlx::{SqlitePool, Row};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use log::{info, error};
+use log::info;
 use crate::common::models::{Group, GroupInvite, InviteStatus, MessageType, User};
 use crate::common::crypto::EncryptedMessage;
 
@@ -654,5 +654,45 @@ impl DatabaseManager {
             Some(role) => Ok(role == "admin"),
             None => Ok(false), // User is not a member of the group
         }
+    }
+
+    /// Delete all messages from a group chat
+    pub async fn delete_group_messages(&self, group_id: Uuid, user_id: Uuid) -> Result<u64> {
+        // Verifica che l'utente sia membro del gruppo
+        if !self.is_user_in_group(user_id, group_id).await? {
+            return Err(anyhow::anyhow!("User is not a member of this group"));
+        }
+
+        let deleted_count = sqlx::query(
+            "DELETE FROM encrypted_messages WHERE group_id = ?"
+        )
+        .bind(group_id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        info!("Deleted {} group messages from group {} by user {}", deleted_count, group_id, user_id);
+        Ok(deleted_count)
+    }
+
+    /// Delete all messages from a private chat between two users
+    pub async fn delete_private_messages(&self, user1_id: Uuid, user2_id: Uuid) -> Result<u64> {
+        let deleted_count = sqlx::query(
+            r#"
+            DELETE FROM encrypted_messages 
+            WHERE group_id IS NULL 
+              AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))
+            "#
+        )
+        .bind(user1_id.to_string())
+        .bind(user2_id.to_string())
+        .bind(user2_id.to_string())
+        .bind(user1_id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        info!("Deleted {} private messages between users {} and {}", deleted_count, user1_id, user2_id);
+        Ok(deleted_count)
     }
 }
