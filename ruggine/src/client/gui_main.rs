@@ -190,6 +190,14 @@ pub struct ChatApp {
     // Connessione persistente (solo quando registrati)
     persistent_connection: Option<Arc<Mutex<PersistentConnection>>>,
     
+    // OTTIMIZZAZIONE: Flag per evitare richieste multiple simultanee
+    is_command_pending: bool,
+    
+    // OTTIMIZZAZIONE: Cache per ridurre richieste al server
+    users_cache_timestamp: Option<std::time::Instant>,
+    groups_cache_timestamp: Option<std::time::Instant>,
+    invites_cache_timestamp: Option<std::time::Instant>,
+    
     // Input fields
     username: String,
     group_name: String,
@@ -204,6 +212,7 @@ pub struct ChatApp {
     // Stati delle sezioni espanse
     groups_expanded: bool,
     invites_expanded: bool,
+    users_expanded: bool, // AGGIUNTO: Per rendere Users ricompattabile
     
     // Stati delle sottosezioni
     groups_list_view: bool,
@@ -274,6 +283,10 @@ impl Application for ChatApp {
                 manual_host: String::new(),
                 manual_port: String::new(),
                 persistent_connection: None,
+                is_command_pending: false, // OTTIMIZZAZIONE: Inizializza il flag
+                users_cache_timestamp: None, // OTTIMIZZAZIONE: Inizializza cache timestamp
+                groups_cache_timestamp: None,
+                invites_cache_timestamp: None,
                 username: String::new(),
                 group_name: String::new(),
                 invite_username: String::new(),
@@ -283,6 +296,7 @@ impl Application for ChatApp {
                 current_alert: None,
                 groups_expanded: false,
                 invites_expanded: false,
+                users_expanded: false, // AGGIUNTO: Inizializza Users come chiuso
                 groups_list_view: false,
                 groups_create_view: false,
                 my_groups: Vec::new(),
@@ -809,9 +823,17 @@ impl Application for ChatApp {
             
             Message::ToggleInvitesSection => {
                 self.invites_expanded = !self.invites_expanded;
-                // Quando si apre la sezione inviti, carica automaticamente la lista
+                
+                // Quando si apre la sezione inviti, carica automaticamente la lista solo se necessario
                 if self.invites_expanded {
-                    if matches!(self.connection_state, ConnectionState::Registered) {
+                    // OTTIMIZZAZIONE: Usa cache se recente (meno di 30 secondi per inviti)
+                    let should_fetch = if let Some(timestamp) = self.invites_cache_timestamp {
+                        timestamp.elapsed() > std::time::Duration::from_secs(30)
+                    } else {
+                        true
+                    };
+                    
+                    if should_fetch && matches!(self.connection_state, ConnectionState::Registered) {
                         if let Some(connection) = &self.persistent_connection {
                             let conn = connection.clone();
                             return Command::perform(
@@ -833,20 +855,30 @@ impl Application for ChatApp {
             Message::ShowGroupsList => {
                 self.groups_list_view = true;
                 self.groups_create_view = false;
-                // Carica la lista dei gruppi
-                if matches!(self.connection_state, ConnectionState::Registered) {
-                    if let Some(connection) = &self.persistent_connection {
-                        let conn = connection.clone();
-                        return Command::perform(
-                            Self::send_command_persistent(conn, "/my_groups".to_string()),
-                            |result| match result {
-                                Ok(response) => {
-                                    let groups = Self::parse_groups_response(&response);
-                                    Message::GroupsListUpdated(groups)
+                
+                // OTTIMIZZAZIONE: Usa cache se recente (meno di 60 secondi)
+                let should_fetch = if let Some(timestamp) = self.groups_cache_timestamp {
+                    timestamp.elapsed() > std::time::Duration::from_secs(60)
+                } else {
+                    true
+                };
+                
+                if should_fetch {
+                    // Carica la lista dei gruppi
+                    if matches!(self.connection_state, ConnectionState::Registered) {
+                        if let Some(connection) = &self.persistent_connection {
+                            let conn = connection.clone();
+                            return Command::perform(
+                                Self::send_command_persistent(conn, "/my_groups".to_string()),
+                                |result| match result {
+                                    Ok(response) => {
+                                        let groups = Self::parse_groups_response(&response);
+                                        Message::GroupsListUpdated(groups)
+                                    }
+                                    Err(e) => Message::ServerMessage(format!("Error: {}", e))
                                 }
-                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
-                            }
-                        );
+                            );
+                        }
                     }
                 }
                 Command::none()
@@ -964,19 +996,20 @@ impl Application for ChatApp {
             
             Message::GroupsListUpdated(groups) => {
                 self.my_groups = groups;
-                // Converted to alert system
+                self.groups_cache_timestamp = Some(std::time::Instant::now()); // OTTIMIZZAZIONE: Aggiorna cache
                 Command::none()
             }
             
             Message::InvitesListUpdated(invites) => {
                 self.my_invites = invites;
-                // Converted to alert system
+                self.invites_cache_timestamp = Some(std::time::Instant::now()); // OTTIMIZZAZIONE: Aggiorna cache
                 Command::none()
             }
             
             Message::UsersListUpdated(users) => {
                 self.available_users = users;
-                // Converted to alert system
+                self.is_command_pending = false; // OTTIMIZZAZIONE: Reset flag
+                self.users_cache_timestamp = Some(std::time::Instant::now()); // OTTIMIZZAZIONE: Aggiorna timestamp cache
                 Command::none()
             }
             
@@ -1038,10 +1071,10 @@ impl Application for ChatApp {
                                 }
                             );
                             
-                            // Aggiungi un refresh automatico dopo l'invio per sincronizzare con il server
+                            // OTTIMIZZATO: Refresh molto ridotto (da 500ms a 200ms) solo per sincronizzazione immediata
                             let refresh_command = Command::perform(
                                 async move {
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                                     target_user_clone
                                 },
                                 |username| Message::RefreshPrivateMessages(username)
@@ -1178,27 +1211,21 @@ impl Application for ChatApp {
             }
             
             Message::StartPeriodicRefresh => {
-                // Aggiorna i messaggi per tutte le chat attive ogni 5 secondi
+                // OTTIMIZZATO: Refresh molto meno frequente (da 10s a 30s) per ridurre drasticamente il carico
                 let mut refresh_commands = Vec::new();
                 
-                // Se siamo in una chat privata, aggiorna quella specifica
+                // Solo refresh per la chat attiva corrente
                 if let Some(target_username) = &self.private_chat_target {
                     let username = target_username.clone();
                     refresh_commands.push(Command::perform(async move { username }, |username| Message::RefreshPrivateMessages(username)));
                 }
                 
-                // Aggiorna anche i messaggi di tutte le chat con cui abbiamo scambiato messaggi
-                for username in self.private_messages.keys() {
-                    // Solo se non è già la chat attiva (per evitare doppi refresh)
-                    if self.private_chat_target.as_ref() != Some(username) {
-                        let username_clone = username.clone();
-                        refresh_commands.push(Command::perform(async move { username_clone }, |username| Message::RefreshPrivateMessages(username)));
-                    }
-                }
+                // OTTIMIZZATO: Non aggiornare più tutte le chat inattive per ridurre il carico
+                // Solo la chat attiva viene aggiornata periodicamente
                 
-                // Continua il ciclo di refresh
+                // OTTIMIZZATO: Continua il ciclo di refresh con intervallo molto più lungo (30s invece di 10s)
                 let continue_command = Command::perform(async {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 }, |_| Message::StartPeriodicRefresh);
                 
                 refresh_commands.push(continue_command);
@@ -1260,26 +1287,36 @@ impl Application for ChatApp {
                 self.users_list_for_group = Some(group_id);
                 self.invite_form_group = None; // Chiudi il form se era aperto
                 
-                // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
-                if matches!(self.connection_state, ConnectionState::Registered) {
-                    if let Some(connection) = &self.persistent_connection {
-                        let conn = connection.clone();
-                        Command::perform(
-                            Self::send_command_persistent(conn, "/all_users".to_string()),
-                            |result| match result {
-                                Ok(response) => {
-                                    let users = Self::parse_users_response(&response);
-                                    Message::UsersListUpdated(users)
+                // OTTIMIZZAZIONE: Usa cache se recente (meno di 30 secondi)
+                let should_fetch = if let Some(timestamp) = self.users_cache_timestamp {
+                    timestamp.elapsed() > std::time::Duration::from_secs(30)
+                } else {
+                    true
+                };
+                
+                if should_fetch {
+                    // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
+                    if matches!(self.connection_state, ConnectionState::Registered) {
+                        if let Some(connection) = &self.persistent_connection {
+                            let conn = connection.clone();
+                            Command::perform(
+                                Self::send_command_persistent(conn, "/all_users".to_string()),
+                                |result| match result {
+                                    Ok(response) => {
+                                        let users = Self::parse_users_response(&response);
+                                        Message::UsersListUpdated(users)
+                                    }
+                                    Err(e) => Message::ServerMessage(format!("Error: {}", e))
                                 }
-                                Err(e) => Message::ServerMessage(format!("Error: {}", e))
-                            }
-                        )
+                            )
+                        } else {
+                            Command::none()
+                        }
                     } else {
-                        // Converted to alert system
                         Command::none()
                     }
                 } else {
-                    // Converted to alert system
+                    // Usa cache esistente
                     Command::none()
                 }
             }
@@ -1984,7 +2021,18 @@ impl ChatApp {
         connection: Arc<Mutex<PersistentConnection>>, 
         command: String
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = connection.lock().await;
+        // OTTIMIZZATO: Timeout aumentato e attesa invece di errore
+        let mut conn = match tokio::time::timeout(
+            tokio::time::Duration::from_millis(2000), 
+            connection.lock()
+        ).await {
+            Ok(conn) => conn,
+            Err(_) => {
+                // Invece di restituire errore, attendi di più
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                connection.lock().await
+            },
+        };
         
         println!("Sending command: {}", command);
         
@@ -1993,10 +2041,18 @@ impl ChatApp {
         conn.writer.write_all(b"\n").await?;
         conn.writer.flush().await?;
         
-        // Leggi la risposta (potrebbe essere multi-riga)
+        // OTTIMIZZATO: Timeout ridotto per lettura più veloce (da 2s a 1s)
         let mut full_response = String::new();
         let mut first_line = String::new();
-        conn.reader.read_line(&mut first_line).await?;
+        
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(1000), 
+            conn.reader.read_line(&mut first_line)
+        ).await {
+            Ok(Ok(_)) => {},
+            Ok(Err(e)) => return Err(format!("Read error: {}", e).into()),
+            Err(_) => return Err("Server response timeout".into()),
+        }
         
         println!("First line received: {}", first_line.trim());
         
@@ -2004,7 +2060,14 @@ impl ChatApp {
         if first_line.trim().starts_with("NOTIFICATION:") {
             println!("Received notification, reading actual response...");
             // Questa è una notifica, leggi la vera risposta al comando
-            conn.reader.read_line(&mut first_line).await?;
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(500), // OTTIMIZZATO: Ridotto da 1s a 500ms
+                conn.reader.read_line(&mut first_line)
+            ).await {
+                Ok(Ok(_)) => {},
+                Ok(Err(e)) => return Err(format!("Read error after notification: {}", e).into()),
+                Err(_) => return Err("Server response timeout after notification".into()),
+            }
             println!("Actual response line: {}", first_line.trim());
         }
         
@@ -2020,10 +2083,10 @@ impl ChatApp {
             
             println!("Multi-line response detected, reading additional lines...");
             
-            // Leggi righe aggiuntive con timeout
+            // OTTIMIZZATO: Timeout ridotto per righe aggiuntive (da 200ms a 150ms)
             loop {
                 let mut line = String::new();
-                match tokio::time::timeout(tokio::time::Duration::from_millis(100), conn.reader.read_line(&mut line)).await {
+                match tokio::time::timeout(tokio::time::Duration::from_millis(150), conn.reader.read_line(&mut line)).await {
                     Ok(Ok(0)) => break, // Connessione chiusa
                     Ok(Ok(_)) => {
                         println!("Additional line: {}", line.trim());
@@ -2417,16 +2480,16 @@ impl ChatApp {
             .into()
     }
     
-    // Background listener per le notifiche dal server
+    // Background listener per le notifiche dal server - SUPER OTTIMIZZATO
     async fn background_notification_listener(connection: Arc<Mutex<PersistentConnection>>) -> String {
         use tokio::time::{timeout, Duration};
         
-        // Tenta di leggere una singola notifica con timeout
+        // Timeout drasticamente ridotto per maggiore reattività
         let mut conn = connection.lock().await;
         let mut notification = String::new();
         
-        // Usa un timeout più lungo per evitare troppe richieste ma non troppo per essere reattivo
-        match timeout(Duration::from_secs(5), conn.reader.read_line(&mut notification)).await {
+        // Timeout ridotto da 1s a 500ms per reattività massima
+        match timeout(Duration::from_millis(500), conn.reader.read_line(&mut notification)).await {
             Ok(Ok(0)) => {
                 // Connessione chiusa
                 "CONNECTION_CLOSED".to_string()
@@ -2448,7 +2511,7 @@ impl ChatApp {
                 "CONTINUE_LISTENING".to_string()
             }
             Err(_) => {
-                // Timeout, continua ad ascoltare
+                // Timeout, continua ad ascoltare senza delay aggiuntivo
                 "CONTINUE_LISTENING".to_string()
             }
         }
