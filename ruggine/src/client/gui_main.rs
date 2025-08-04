@@ -123,6 +123,7 @@ pub enum Message {
     NotificationReceived(String), // notifica dal server
     StartBackgroundListener, // avvia il listener per le notifiche
     StartPeriodicRefresh, // avvia refresh periodico per le chat
+    TogglePrivateChatMenu, // Toggle del menu delle azioni chat privata
     
     // Chat di gruppo
     StartGroupChat(String, String), // (group_id, group_name)
@@ -134,7 +135,6 @@ pub enum Message {
     DeleteGroupMessages(String), // group_id
     DeletePrivateMessages(String), // username
     ConfirmDeleteGroupMessages(String), // group_id
-    ConfirmDeletePrivateMessages(String), // username
     CancelDelete,
     
     // Sistema di alert
@@ -223,6 +223,7 @@ pub struct ChatApp {
     private_chat_target: Option<String>, // Username del destinatario della chat privata
     private_chat_input: String,          // Testo del messaggio privato
     private_messages: std::collections::HashMap<String, Vec<String>>, // Cronologia messaggi per utente
+    private_chat_menu_open: bool,        // Stato del menu delle azioni chat privata
     
     // Chat di gruppo
     group_chat_target: Option<(String, String)>, // (group_id, group_name) della chat di gruppo attiva
@@ -293,6 +294,7 @@ impl Application for ChatApp {
                 private_chat_target: None,
                 private_chat_input: String::new(),
                 private_messages: std::collections::HashMap::new(),
+                private_chat_menu_open: false,
                 group_chat_target: None,
                 group_chat_input: String::new(),
                 group_messages: std::collections::HashMap::new(),
@@ -465,6 +467,7 @@ impl Application for ChatApp {
                 self.private_chat_target = None;
                 self.private_chat_input.clear();
                 self.private_messages.clear();
+                self.private_chat_menu_open = false;
                 self.group_chat_target = None;
                 self.group_chat_input.clear();
                 self.group_messages.clear();
@@ -982,6 +985,7 @@ impl Application for ChatApp {
                 self.private_chat_target = Some(username.clone());
                 self.app_state = AppState::PrivateChat(username.clone());
                 self.private_chat_input.clear();
+                self.private_chat_menu_open = false; // Reset del menu quando si apre una nuova chat
                 
                 // Ricarica automaticamente i messaggi dal server
                 return Command::perform(async { username }, |username| Message::RefreshPrivateMessages(username));
@@ -991,6 +995,12 @@ impl Application for ChatApp {
                 self.private_chat_target = None;
                 self.app_state = AppState::Chat;
                 self.private_chat_input.clear();
+                self.private_chat_menu_open = false; // Reset del menu quando si chiude la chat
+                Command::none()
+            }
+            
+            Message::TogglePrivateChatMenu => {
+                self.private_chat_menu_open = !self.private_chat_menu_open;
                 Command::none()
             }
             
@@ -1434,11 +1444,21 @@ impl Application for ChatApp {
             }
 
             Message::DeletePrivateMessages(username) => {
-                self.delete_confirmation = Some(DeleteConfirmation {
-                    delete_type: DeleteType::PrivateMessages,
-                    target: username,
-                });
-                Command::none()
+                // Elimina SOLO i messaggi locali, non dal server
+                // Questo permette ad ogni utente di eliminare la propria cronologia
+                // senza influenzare la cronologia dell'altro utente
+                
+                // Rimuovi dalla cronologia locale
+                self.private_messages.remove(&username);
+                
+                // Chiudi il menu dopo l'eliminazione
+                self.private_chat_menu_open = false;
+                
+                // Mostra conferma che i messaggi locali sono stati eliminati
+                Command::perform(async {}, |_| Message::ShowAlert(
+                    "Local message history cleared. This only affects your view.".to_string(),
+                    AlertType::Success
+                ))
             }
 
             Message::ConfirmDeleteGroupMessages(group_id) => {
@@ -1447,34 +1467,6 @@ impl Application for ChatApp {
                     if let Some(connection) = &self.persistent_connection {
                         let conn = connection.clone();
                         let command = format!("/delete_group_messages {}", group_id);
-                        
-                        return Command::perform(
-                            Self::send_command_persistent(conn, command),
-                            |result| match result {
-                                Ok(response) => Message::ShowAlert(
-                                    format!("Messages deleted: {}", response),
-                                    AlertType::Success
-                                ),
-                                Err(e) => Message::ShowAlert(
-                                    format!("Error deleting messages: {}", e),
-                                    AlertType::Error
-                                )
-                            }
-                        );
-                    }
-                }
-                Command::none()
-            }
-
-            Message::ConfirmDeletePrivateMessages(username) => {
-                self.delete_confirmation = None;
-                if matches!(self.connection_state, ConnectionState::Registered) {
-                    if let Some(connection) = &self.persistent_connection {
-                        let conn = connection.clone();
-                        let command = format!("/delete_private_messages {}", username);
-                        
-                        // Rimuovi anche dalla cronologia locale
-                        self.private_messages.remove(&username);
                         
                         return Command::perform(
                             Self::send_command_persistent(conn, command),
@@ -2223,11 +2215,50 @@ impl ChatApp {
         let empty_messages = Vec::new();
         let messages = self.private_messages.get(username).unwrap_or(&empty_messages);
         
+        // Header con titolo e menu
+        let header = row![
+            // Titolo della chat
+            text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
+            // Spacer per spingere il menu a destra
+            container(text("")).width(Length::Fill),
+            // Menu a tendina in alto a destra
+            if self.private_chat_menu_open {
+                column![
+                    button(text("⚙️").font(EMOJI_FONT))
+                        .on_press(Message::TogglePrivateChatMenu)
+                        .padding(5),
+                    container(
+                        column![
+                            button(text("�️ Delete Messages").font(EMOJI_FONT))
+                                .on_press(Message::DeletePrivateMessages(username.to_string()))
+                                .padding(8)
+                                .width(Length::Fixed(150.0))
+                                .style(iced::theme::Button::Destructive),
+                        ]
+                        .spacing(5)
+                    )
+                    .padding(5)
+                    .style(iced::theme::Container::Box)
+                ]
+                .align_items(Alignment::End)
+            } else {
+                column![
+                    button(text("⚙️").font(EMOJI_FONT))
+                        .on_press(Message::TogglePrivateChatMenu)
+                        .padding(5),
+                ]
+                .align_items(Alignment::End)
+            }
+        ]
+        .spacing(10)
+        .align_items(Alignment::Center);
+        
         let messages_area = if messages.is_empty() {
-            column![
-                text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
-                text("No messages yet. Start the conversation!").size(14),
-            ].spacing(10)
+            scrollable(
+                column![
+                    text("No messages yet. Start the conversation!").size(14),
+                ].spacing(10)
+            ).height(Length::Fixed(300.0))
         } else {
             let message_widgets: Vec<Element<Message>> = messages
                 .iter()
@@ -2241,14 +2272,11 @@ impl ChatApp {
                 })
                 .collect();
                 
-            column![
-                text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
-                scrollable(
-                    column(message_widgets)
-                        .spacing(5)
-                        .padding(10)
-                ).height(Length::Fixed(300.0))
-            ].spacing(10)
+            scrollable(
+                column(message_widgets)
+                    .spacing(5)
+                    .padding(10)
+            ).height(Length::Fixed(300.0))
         };
         
         let input_section = row![
@@ -2266,58 +2294,13 @@ impl ChatApp {
             .on_press(Message::ClosePrivateChat)
             .padding(5);
 
-        // Menu a tendina per le azioni della chat
-        let chat_actions = row![
-            button(text("🗑️ Delete Messages").font(EMOJI_FONT))
-                .on_press(Message::DeletePrivateMessages(username.to_string()))
-                .padding(5)
-                .style(iced::theme::Button::Destructive),
-        ].spacing(10);
-
-        // Controllo se c'è una finestra di conferma di eliminazione
-        let content = if let Some(ref confirmation) = self.delete_confirmation {
-            if matches!(confirmation.delete_type, DeleteType::PrivateMessages) && confirmation.target == username {
-                // Mostra dialog di conferma
-                column![
-                    back_button,
-                    messages_area,
-                    input_section,
-                    chat_actions,
-                    container(
-                        column![
-                            text("⚠️ Delete All Messages").size(18).font(BOLD_FONT),
-                            text(format!("Are you sure you want to delete all messages with {}?", username)).size(14),
-                            text("This action cannot be undone.").size(12),
-                            row![
-                                button(text("✅ Yes, Delete").font(EMOJI_FONT))
-                                    .on_press(Message::ConfirmDeletePrivateMessages(username.to_string()))
-                                    .padding(10)
-                                    .style(iced::theme::Button::Destructive),
-                                button(text("❌ Cancel").font(EMOJI_FONT))
-                                    .on_press(Message::CancelDelete)
-                                    .padding(10),
-                            ].spacing(20)
-                        ].spacing(10).align_items(iced::Alignment::Center)
-                    )
-                    .padding(20)
-                    .style(iced::theme::Container::Box)
-                ].spacing(20).padding(20)
-            } else {
-                column![
-                    back_button,
-                    messages_area,
-                    input_section,
-                    chat_actions,
-                ].spacing(20).padding(20)
-            }
-        } else {
-            column![
-                back_button,
-                messages_area,
-                input_section,
-                chat_actions,
-            ].spacing(20).padding(20)
-        };
+        // Layout semplice senza form di conferma
+        let content = column![
+            back_button,
+            header,
+            messages_area,
+            input_section,
+        ].spacing(20).padding(20);
         
         container(content)
             .width(Length::Fill)
