@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
@@ -42,7 +43,7 @@ path = "src/server/main.rs"
 name = "ruggine-gui"
 path = "src/client/gui_main.rs"
 
-[[bin]]
-name = "ruggine-mobile"
-path = "src/client/mobile_main.rs"
+# [[bin]]
+# name = "ruggine-mobile"
+# path = "src/client/mobile_main.rs"
 

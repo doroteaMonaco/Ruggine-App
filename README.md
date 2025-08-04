@@ -102,6 +102,7 @@ input area non c'è
 fare login
 trigger per messaggi effimeri
 richieste di amicizia
+eliminare messaggi db troppo vecchi per efficienza
 
 ![alt text](image.png)
 ![alt text](image-1.png)
