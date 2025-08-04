@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufWriter, BufReader};
 
-use ruggine::client::ClientConfig;
+use ruggine::client::config::ClientConfig;
 
 // Font per emoji
 const EMOJI_FONT: Font = Font::with_name("Segoe UI Emoji");
@@ -120,6 +120,9 @@ pub enum Message {
     SendPrivateMessage,
     RefreshPrivateMessages(String), // username - ricarica messaggi dal server
     UpdatePrivateMessagesFromServer(String, String), // (username, server_response)
+    NotificationReceived(String), // notifica dal server
+    StartBackgroundListener, // avvia il listener per le notifiche
+    StartPeriodicRefresh, // avvia refresh periodico per le chat
     
     // Chat di gruppo
     StartGroupChat(String, String), // (group_id, group_name)
@@ -417,11 +420,17 @@ impl Application for ChatApp {
             Message::RegistrationSuccess(connection) => {
                 self.connection_state = ConnectionState::Registered;
                 self.app_state = AppState::MainActions;
-                self.persistent_connection = Some(connection);
-                Command::perform(async {}, |_| Message::ShowAlert(
+                self.persistent_connection = Some(connection.clone());
+                
+                let alert_command = Command::perform(async {}, |_| Message::ShowAlert(
                     "Registration successful! Welcome to Ruggine Chat.".to_string(),
                     AlertType::Success
-                ))
+                ));
+                
+                let listener_command = Command::perform(async {}, |_| Message::StartBackgroundListener);
+                let refresh_command = Command::perform(async {}, |_| Message::StartPeriodicRefresh);
+                
+                Command::batch(vec![alert_command, listener_command, refresh_command])
             }
             
             Message::DisconnectPressed => {
@@ -995,24 +1004,40 @@ impl Application for ChatApp {
                     if !self.private_chat_input.trim().is_empty() {
                         if let Some(connection) = &self.persistent_connection {
                             let conn = connection.clone();
-                            let message = format!("/private {} {}", target_user, self.private_chat_input);
-                            let sent_message = format!("You: {}", self.private_chat_input);
+                            let target_user_clone = target_user.clone();
+                            let message_text = self.private_chat_input.trim().to_string();
+                            let message = format!("/private {} {}", target_user, message_text);
+                            let sent_message = format!("You: {}", message_text);
                             
-                            // Aggiungi il messaggio alla cronologia locale
-                            self.private_messages
+                            // Aggiungi il messaggio alla cronologia locale solo se non è già presente
+                            let messages = self.private_messages
                                 .entry(target_user.clone())
-                                .or_insert_with(Vec::new)
-                                .push(sent_message);
+                                .or_insert_with(Vec::new);
+                            
+                            if !messages.contains(&sent_message) {
+                                messages.push(sent_message);
+                            }
                             
                             self.private_chat_input.clear();
                             
-                            return Command::perform(
+                            let send_command = Command::perform(
                                 Self::send_command_persistent(conn, message),
                                 |result| match result {
                                     Ok(_) => Message::ShowAlert("Message sent".to_string(), AlertType::Success),
                                     Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
                                 }
                             );
+                            
+                            // Aggiungi un refresh automatico dopo l'invio per sincronizzare con il server
+                            let refresh_command = Command::perform(
+                                async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                                    target_user_clone
+                                },
+                                |username| Message::RefreshPrivateMessages(username)
+                            );
+                            
+                            return Command::batch(vec![send_command, refresh_command]);
                         }
                     }
                 }
@@ -1023,14 +1048,20 @@ impl Application for ChatApp {
                 if let Some(connection) = &self.persistent_connection {
                     let conn = connection.clone();
                     let command = format!("/get_private_messages {}", username);
+                    println!("Refreshing private messages for {}: {}", username, command);
+                    
                     return Command::perform(
                         Self::send_command_persistent(conn, command),
                         |result| match result {
                             Ok(response) => {
+                                println!("Get messages response: {}", response);
                                 // Parse la risposta e aggiorna i messaggi
                                 Message::UpdatePrivateMessagesFromServer(username, response)
                             }
-                            Err(e) => Message::ShowAlert(format!("Failed to refresh messages: {}", e), AlertType::Error)
+                            Err(e) => {
+                                println!("Get messages error: {}", e);
+                                Message::ShowAlert(format!("Failed to refresh messages: {}", e), AlertType::Error)
+                            }
                         }
                     );
                 }
@@ -1038,17 +1069,130 @@ impl Application for ChatApp {
             }
             
             Message::UpdatePrivateMessagesFromServer(username, server_response) => {
+                println!("Updating private messages from server for {}: {}", username, server_response);
+                
                 // Parse la risposta del server e aggiorna i messaggi per questo utente
                 if server_response.starts_with("OK:") {
                     let messages = Self::parse_private_messages_response(&server_response);
-                    self.private_messages.insert(username, messages);
+                    println!("Parsed {} messages from server", messages.len());
+                    
+                    // Unisci i messaggi esistenti con quelli nuovi, evitando duplicati
+                    let existing_messages = self.private_messages.get(&username).cloned().unwrap_or_default();
+                    let mut all_messages = existing_messages;
+                    
+                    // Aggiungi solo i messaggi che non sono già presenti
+                    for new_message in messages {
+                        if !all_messages.contains(&new_message) {
+                            all_messages.push(new_message);
+                        }
+                    }
+                    
+                    println!("Total messages after merge: {}", all_messages.len());
+                    self.private_messages.insert(username, all_messages);
                 } else {
+                    println!("Server response indicates error or no messages: {}", server_response);
                     // La risposta indica un errore o nessun messaggio
                     if server_response.contains("No messages found") {
-                        self.private_messages.insert(username, Vec::new());
+                        // Mantieni i messaggi locali esistenti se il server non ne ha
+                        if !self.private_messages.contains_key(&username) {
+                            self.private_messages.insert(username, Vec::new());
+                        }
                     }
                 }
                 Command::none()
+            }
+            
+            Message::NotificationReceived(notification) => {
+                println!("Received notification: {}", notification);
+                
+                // Gestisce le notifiche dal server (es. "NOTIFICATION:PRIVATE_MESSAGE:username")
+                if notification == "CONNECTION_CLOSED" {
+                    // La connessione è stata chiusa, non fare nulla
+                    return Command::none();
+                }
+                
+                if notification == "CONTINUE_LISTENING" {
+                    // Riavvia semplicemente il listener
+                    if let Some(connection) = &self.persistent_connection {
+                        let conn_clone = connection.clone();
+                        return Command::perform(Self::background_notification_listener(conn_clone), |notification| {
+                            Message::NotificationReceived(notification)
+                        });
+                    }
+                    return Command::none();
+                }
+                
+                let mut commands = Vec::new();
+                
+                if notification.starts_with("NOTIFICATION:PRIVATE_MESSAGE:") {
+                    let username = notification.strip_prefix("NOTIFICATION:PRIVATE_MESSAGE:").unwrap_or("").to_string();
+                    println!("Private message notification from: {}", username);
+                    
+                    if !username.is_empty() {
+                        // Crea copie per evitare problemi di ownership
+                        let username_for_first_refresh = username.clone();
+                        let username_for_comparison = username.clone();
+                        
+                        // Aggiorna sempre i messaggi quando arriva una notifica, 
+                        // indipendentemente dalla chat attiva
+                        commands.push(Command::perform(async move { username_for_first_refresh }, |username| Message::RefreshPrivateMessages(username)));
+                        
+                        // Se stiamo visualizzando la chat con questo utente, forza un refresh immediato
+                        if let Some(target_username) = &self.private_chat_target {
+                            if target_username == &username_for_comparison {
+                                commands.push(Command::perform(async move { username_for_comparison }, |username| Message::RefreshPrivateMessages(username)));
+                            }
+                        }
+                    }
+                }
+                
+                // Riavvia il background listener per continuare ad ascoltare
+                if let Some(connection) = &self.persistent_connection {
+                    let conn_clone = connection.clone();
+                    commands.push(Command::perform(Self::background_notification_listener(conn_clone), |notification| {
+                        Message::NotificationReceived(notification)
+                    }));
+                }
+                
+                Command::batch(commands)
+            }
+            
+            Message::StartBackgroundListener => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn_clone = connection.clone();
+                    return Command::perform(Self::background_notification_listener(conn_clone), |notification| {
+                        Message::NotificationReceived(notification)
+                    });
+                }
+                Command::none()
+            }
+            
+            Message::StartPeriodicRefresh => {
+                // Aggiorna i messaggi per tutte le chat attive ogni 5 secondi
+                let mut refresh_commands = Vec::new();
+                
+                // Se siamo in una chat privata, aggiorna quella specifica
+                if let Some(target_username) = &self.private_chat_target {
+                    let username = target_username.clone();
+                    refresh_commands.push(Command::perform(async move { username }, |username| Message::RefreshPrivateMessages(username)));
+                }
+                
+                // Aggiorna anche i messaggi di tutte le chat con cui abbiamo scambiato messaggi
+                for username in self.private_messages.keys() {
+                    // Solo se non è già la chat attiva (per evitare doppi refresh)
+                    if self.private_chat_target.as_ref() != Some(username) {
+                        let username_clone = username.clone();
+                        refresh_commands.push(Command::perform(async move { username_clone }, |username| Message::RefreshPrivateMessages(username)));
+                    }
+                }
+                
+                // Continua il ciclo di refresh
+                let continue_command = Command::perform(async {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }, |_| Message::StartPeriodicRefresh);
+                
+                refresh_commands.push(continue_command);
+                Command::batch(refresh_commands)
             }
             
             // Chat di gruppo
@@ -1779,20 +1923,14 @@ impl ChatApp {
         }
     }
     
-    async fn test_connection(host: String, port: String) -> Result<(), String> {
-        let address = format!("{}:{}", host, port);
-        match TcpStream::connect(&address).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!("Failed to connect to {}: {}", address, e))
-        }
-    }
-    
     async fn connect_and_register_persistent(
         host: String, 
         port: String, 
         username: String
     ) -> Result<(String, Arc<Mutex<PersistentConnection>>), Box<dyn std::error::Error + Send + Sync>> {
         let address = format!("{}:{}", host, port);
+        
+        println!("Connecting to {}", address);
         
         // Connetti al server
         let stream = TcpStream::connect(&address).await?;
@@ -1802,19 +1940,30 @@ impl ChatApp {
         let mut writer = BufWriter::new(writer);
         let mut reader = BufReader::new(reader);
         
-        // Leggi il messaggio di benvenuto
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        println!("Connected, reading welcome message...");
+        
+        // Leggi il messaggio di benvenuto completo - il server invia esattamente 8 righe
         let mut welcome_lines = Vec::new();
-        loop {
+        for i in 0..8 {
             let mut line = String::new();
-            match tokio::time::timeout(tokio::time::Duration::from_millis(50), reader.read_line(&mut line)).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(_)) => {
-                    welcome_lines.push(line.trim().to_string());
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    println!("EOF raggiunto dopo {} righe", i);
+                    break; // EOF
                 }
-                _ => break,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    println!("Welcome line {}: '{}'", i, trimmed);
+                    welcome_lines.push(trimmed.to_string());
+                }
+                Err(e) => {
+                    println!("Errore durante lettura welcome: {}", e);
+                    return Err(e.into());
+                }
             }
         }
+        
+        println!("Welcome message read, sending registration...");
         
         // Invia il comando di registrazione
         let command = format!("/register {}", username);
@@ -1822,9 +1971,13 @@ impl ChatApp {
         writer.write_all(b"\n").await?;
         writer.flush().await?;
         
+        println!("Registration sent, waiting for response...");
+        
         // Leggi la risposta
         let mut response = String::new();
         reader.read_line(&mut response).await?;
+        
+        println!("Registration response: {}", response.trim());
         
         // Crea la connessione persistente
         let persistent_conn = PersistentConnection {
@@ -1841,6 +1994,8 @@ impl ChatApp {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = connection.lock().await;
         
+        println!("Sending command: {}", command);
+        
         // Invia il comando
         conn.writer.write_all(command.as_bytes()).await?;
         conn.writer.write_all(b"\n").await?;
@@ -1850,6 +2005,17 @@ impl ChatApp {
         let mut full_response = String::new();
         let mut first_line = String::new();
         conn.reader.read_line(&mut first_line).await?;
+        
+        println!("First line received: {}", first_line.trim());
+        
+        // Controlla se è una notifica (e la ignora per ora)
+        if first_line.trim().starts_with("NOTIFICATION:") {
+            println!("Received notification, reading actual response...");
+            // Questa è una notifica, leggi la vera risposta al comando
+            conn.reader.read_line(&mut first_line).await?;
+            println!("Actual response line: {}", first_line.trim());
+        }
+        
         full_response.push_str(&first_line);
         
         // Se la prima riga contiene "Your pending invites:" o altri pattern multi-riga,
@@ -1857,7 +2023,10 @@ impl ChatApp {
         if first_line.contains("Your pending invites:") || 
            first_line.contains("Your groups:") ||
            first_line.contains("Online users:") ||
-           first_line.contains("All users:") {
+           first_line.contains("All users:") ||
+           first_line.contains("Private messages:") {
+            
+            println!("Multi-line response detected, reading additional lines...");
             
             // Leggi righe aggiuntive con timeout
             loop {
@@ -1865,6 +2034,11 @@ impl ChatApp {
                 match tokio::time::timeout(tokio::time::Duration::from_millis(100), conn.reader.read_line(&mut line)).await {
                     Ok(Ok(0)) => break, // Connessione chiusa
                     Ok(Ok(_)) => {
+                        println!("Additional line: {}", line.trim());
+                        // Ignora le notifiche anche qui
+                        if line.trim().starts_with("NOTIFICATION:") {
+                            continue;
+                        }
                         if line.trim().is_empty() {
                             break; // Riga vuota indica fine della risposta multi-riga
                         }
@@ -1875,72 +2049,8 @@ impl ChatApp {
             }
         }
         
+        println!("Final response: {}", full_response.trim());
         Ok(full_response.trim().to_string())
-    }
-    
-    async fn connect_and_register(host: String, port: String, username: String) -> Result<String, Box<dyn std::error::Error>> {
-        let command = format!("/register {}", username);
-        let response = Self::send_tcp_command(&host, &port, &command).await?;
-        Ok(response)
-    }
-    
-    async fn send_tcp_command(host: &str, port: &str, command: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let address = format!("{}:{}", host, port);
-        
-        // Connetti al server
-        let stream = TcpStream::connect(&address).await?;
-        
-        // Crea reader e writer
-        let (reader, writer) = stream.into_split();
-        let mut writer = BufWriter::new(writer);
-        let mut reader = BufReader::new(reader);
-        
-        // Leggi il messaggio di benvenuto (più righe) fino a quando non diventa silenzioso
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let mut welcome_lines = Vec::new();
-        loop {
-            let mut line = String::new();
-            match tokio::time::timeout(tokio::time::Duration::from_millis(50), reader.read_line(&mut line)).await {
-                Ok(Ok(0)) => break, // Connessione chiusa
-                Ok(Ok(_)) => {
-                    welcome_lines.push(line.trim().to_string());
-                }
-                _ => break, // Timeout o errore - non ci sono più dati
-            }
-        }
-        
-        // Invia il comando
-        writer.write_all(command.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
-        
-        // Leggi la risposta del comando
-        let mut response = String::new();
-        reader.read_line(&mut response).await?;
-        
-        Ok(response.trim().to_string())
-    }
-    
-    async fn send_register_command(host: String, port: String, username: String) -> Result<String, Box<dyn std::error::Error>> {
-        let command = format!("/register {}", username);
-        let response = Self::send_tcp_command(&host, &port, &command).await?;
-        Ok(format!("[Registration] {}", response))
-    }
-    
-    async fn send_list_users_command(host: String, port: String) -> Result<String, Box<dyn std::error::Error>> {
-        let response = Self::send_tcp_command(&host, &port, "/users").await?;
-        Ok(format!("[Users] {}", response))
-    }
-    
-    async fn send_create_group_command(host: String, port: String, group_name: String) -> Result<String, Box<dyn std::error::Error>> {
-        let command = format!("/create_group {}", group_name);
-        let response = Self::send_tcp_command(&host, &port, &command).await?;
-        Ok(format!("[Group] {}", response))
-    }
-    
-    async fn send_list_groups_command(host: String, port: String) -> Result<String, Box<dyn std::error::Error>> {
-        let response = Self::send_tcp_command(&host, &port, "/my_groups").await?;
-        Ok(format!("[My Groups] {}", response))
     }
     
     // Helper functions per parsare le risposte del server
@@ -2064,17 +2174,42 @@ impl ChatApp {
     }
     
     fn parse_private_messages_response(response: &str) -> Vec<String> {
-        if response.starts_with("OK:") && response.contains("Private messages:") {
-            // La risposta ha il formato: "OK: Private messages:\nMessaggio 1\nMessaggio 2\n..."
-            let lines: Vec<&str> = response.lines().collect();
-            if lines.len() > 1 {
-                // Salta la prima riga ("OK: Private messages:")
-                lines[1..].iter()
-                    .filter(|line| !line.trim().is_empty())
-                    .map(|line| line.to_string())
-                    .collect()
+        if response.starts_with("OK:") {
+            // Gestisci diversi formati di risposta possibili
+            if response.contains("Private messages:") {
+                // Formato: "OK: Private messages:\nMessaggio 1\nMessaggio 2\n..."
+                let lines: Vec<&str> = response.lines().collect();
+                if lines.len() > 1 {
+                    // Salta la prima riga ("OK: Private messages:")
+                    lines[1..].iter()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(|line| line.trim().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else if response.contains("Messages:") {
+                // Formato alternativo: "OK: Messages:\n..."
+                let lines: Vec<&str> = response.lines().collect();
+                if lines.len() > 1 {
+                    lines[1..].iter()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(|line| line.trim().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             } else {
-                Vec::new()
+                // Formato semplice: ogni riga dopo "OK:" è un messaggio
+                let lines: Vec<&str> = response.lines().collect();
+                if lines.len() > 1 {
+                    lines[1..].iter()
+                        .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("OK:"))
+                        .map(|line| line.trim().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
@@ -2297,6 +2432,43 @@ impl ChatApp {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+    
+    // Background listener per le notifiche dal server
+    async fn background_notification_listener(connection: Arc<Mutex<PersistentConnection>>) -> String {
+        use tokio::time::{timeout, Duration};
+        
+        // Tenta di leggere una singola notifica con timeout
+        let mut conn = connection.lock().await;
+        let mut notification = String::new();
+        
+        // Usa un timeout più lungo per evitare troppe richieste ma non troppo per essere reattivo
+        match timeout(Duration::from_secs(5), conn.reader.read_line(&mut notification)).await {
+            Ok(Ok(0)) => {
+                // Connessione chiusa
+                "CONNECTION_CLOSED".to_string()
+            }
+            Ok(Ok(_)) => {
+                let trimmed = notification.trim();
+                if trimmed.starts_with("NOTIFICATION:") {
+                    trimmed.to_string()
+                } else if !trimmed.is_empty() {
+                    // Messaggio non di notifica ricevuto, continua ad ascoltare
+                    "CONTINUE_LISTENING".to_string()
+                } else {
+                    // Riga vuota, continua ad ascoltare
+                    "CONTINUE_LISTENING".to_string()
+                }
+            }
+            Ok(Err(_)) => {
+                // Errore di lettura, riprova
+                "CONTINUE_LISTENING".to_string()
+            }
+            Err(_) => {
+                // Timeout, continua ad ascoltare
+                "CONTINUE_LISTENING".to_string()
+            }
+        }
     }
 }
 

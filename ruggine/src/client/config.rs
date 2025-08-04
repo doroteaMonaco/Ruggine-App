@@ -2,6 +2,8 @@ use dotenvy::dotenv;
 use log::info;
 use std::env;
 
+#[allow(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub default_host: String,
@@ -9,6 +11,7 @@ pub struct ClientConfig {
     pub public_host: String,
 }
 
+#[allow(dead_code)]
 impl ClientConfig {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         // Carica il file .env

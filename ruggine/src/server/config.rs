@@ -1,6 +1,8 @@
 use std::env;
 use std::path::Path;
 
+#[allow(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -18,6 +20,7 @@ pub struct Config {
     pub enable_encryption: bool,
 }
 
+#[allow(dead_code)]
 impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         // Carica il file .env se esiste

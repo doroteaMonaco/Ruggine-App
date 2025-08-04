@@ -1,6 +1,5 @@
 // Importiamo i moduli comuni dalla libreria
-use ruggine::server::{ChatManager, DatabaseManager, Config, ClientConnection};
-use ruggine::utils::RuggineLogger;
+use ruggine::server::{chat_manager::ChatManager, database::DatabaseManager, config::Config, connection::ClientConnection};
 
 use clap::Parser;
 use log::{info, warn, error};

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use sqlx::{SqlitePool, Row};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -6,6 +8,7 @@ use log::info;
 use crate::common::models::{Group, GroupInvite, InviteStatus, MessageType, User};
 use crate::common::crypto::EncryptedMessage;
 
+#[allow(dead_code)]
 /// Gestore del database SQLite per l'applicazione Ruggine
 pub struct DatabaseManager {
     pool: SqlitePool,

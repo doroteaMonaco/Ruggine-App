@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,6 +25,8 @@ pub struct ConnectedUser {
 }
 
 // Struttura per gestire le notifiche ai client
+#[allow(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum ClientNotification {
     NewPrivateMessage {
@@ -39,6 +43,8 @@ pub enum ClientNotification {
     },
 }
 
+#[allow(dead_code)]
+#[allow(dead_code)]
 pub struct ChatManager {
     users: Arc<RwLock<HashMap<Uuid, ConnectedUser>>>,
     usernames: Arc<RwLock<HashMap<String, Uuid>>>, // username -> user_id mapping
@@ -53,7 +59,8 @@ pub struct ChatManager {
 }
 
 impl ChatManager {
-    pub fn new(db_manager: Arc<DatabaseManager>) -> Self {
+        #[allow(dead_code)]
+    pub fn new(database: Arc<DatabaseManager>) -> Self {
         Self {
             users: Arc::new(RwLock::new(HashMap::new())),
             usernames: Arc::new(RwLock::new(HashMap::new())),
@@ -62,11 +69,12 @@ impl ChatManager {
             invites: Arc::new(RwLock::new(HashMap::new())),
             encrypted_messages: Arc::new(RwLock::new(Vec::new())),
             crypto_manager: Arc::new(RwLock::new(CryptoManager::new())),
-            db_manager,
+            db_manager: database,
             notification_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
+    #[allow(dead_code)]
     pub async fn register_user(&self, username: String, addr: SocketAddr) -> Result<Uuid, String> {
         // Controlla se l'username è già in uso nel database
         match self.db_manager.get_user_by_username(&username).await {
@@ -141,6 +149,7 @@ impl ChatManager {
         Ok(user_id)
     }
     
+    #[allow(dead_code)]
     pub async fn user_disconnected(&self, user_id: Uuid) {
         // Aggiorna lo stato nel database
         if let Err(e) = self.db_manager.update_user_online_status(user_id, false).await {
@@ -164,6 +173,7 @@ impl ChatManager {
     }
 
     /// Registra un canale di notifica per un utente
+    #[allow(dead_code)]
     pub async fn register_notification_channel(&self, user_id: Uuid, sender: mpsc::UnboundedSender<ClientNotification>) {
         let mut senders = self.notification_senders.write().await;
         senders.insert(user_id, sender);
@@ -171,6 +181,7 @@ impl ChatManager {
     }
 
     /// Invia una notifica a un utente specifico
+    #[allow(dead_code)]
     pub async fn send_notification(&self, user_id: Uuid, notification: ClientNotification) {
         let senders = self.notification_senders.read().await;
         if let Some(sender) = senders.get(&user_id) {
@@ -238,7 +249,8 @@ impl ChatManager {
     }
 
     // === GROUP MANAGEMENT ===
-    pub async fn create_group(&self, creator_id: Uuid, group_name: String) -> Result<Uuid, String> {
+    #[allow(dead_code)]
+    pub async fn create_group(&self, group_name: String, creator_id: Uuid) -> Result<Uuid, String> {
         // Crea il gruppo nel database
         let group_id = Uuid::new_v4();
         let group = Group {

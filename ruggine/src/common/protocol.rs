@@ -131,7 +131,11 @@ pub enum ServerMessage {
 }
 
 /// Configurazione del protocollo
+#[allow(dead_code)]
 pub const PROTOCOL_VERSION: &str = "1.0";
+#[allow(dead_code)]
 pub const MAX_MESSAGE_SIZE: usize = 4096;
+#[allow(dead_code)]
 pub const MAX_USERNAME_LENGTH: usize = 32;
+#[allow(dead_code)]
 pub const MAX_GROUP_NAME_LENGTH: usize = 64;

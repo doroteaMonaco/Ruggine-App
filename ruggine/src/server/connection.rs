@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::server::chat_manager::{ChatManager, ClientNotification};
 use log::{info, error, debug};
 use std::net::SocketAddr;
@@ -7,13 +9,13 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+#[allow(dead_code)]
 pub struct ClientConnection {
     stream: TcpStream,
     addr: SocketAddr,
-    user_id: Option<Uuid>,
-    username: Option<String>,
 }
 
+#[allow(dead_code)]
 async fn send_welcome(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let welcome_msg = r#"
 === Welcome to Ruggine Chat Server ===
@@ -29,18 +31,21 @@ Please register first: /register <your_username>
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn send_success(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     writer.write_all(format!("OK: {}\n", message).as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn send_error(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     writer.write_all(format!("ERROR: {}\n", message).as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn send_help(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let help_msg = r#"
 === Ruggine Chat Commands ===
@@ -77,6 +82,7 @@ Example usage:
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn process_command(
     command: &str,
     chat_manager: &Arc<ChatManager>,
@@ -161,7 +167,7 @@ async fn process_command(
             }
             
             let group_name = parts[1].to_string();
-            match chat_manager.create_group(user_id.unwrap(), group_name.clone()).await {
+            match chat_manager.create_group(group_name.clone(), user_id.unwrap()).await {
                 Ok(_) => {
                     send_success(writer, &format!("Group '{}' created successfully", group_name)).await?;
                 }
@@ -534,13 +540,12 @@ async fn process_command(
     Ok(())
 }
 
+#[allow(dead_code)]
 impl ClientConnection {
     pub fn new(stream: TcpStream, addr: SocketAddr) -> Self {
         Self {
             stream,
             addr,
-            user_id: None,
-            username: None,
         }
     }
     

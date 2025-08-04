@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::common::models::PerformanceMetrics;
 use chrono::Utc;
 use log::{info, warn};
@@ -8,6 +10,7 @@ use tokio::sync::RwLock;
 use tokio::time::interval;
 
 /// Monitor delle prestazioni del sistema
+#[allow(dead_code)]
 pub struct PerformanceMonitor {
     system: Arc<RwLock<System>>,
     active_connections: Arc<RwLock<usize>>,

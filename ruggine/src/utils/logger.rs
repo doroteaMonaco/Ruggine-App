@@ -1,9 +1,12 @@
+#![allow(dead_code)]
+
 use chrono::Utc;
 use log::info;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
+#[allow(dead_code)]
 /// Configurazione avanzata del logger per il progetto Ruggine
 pub struct RuggineLogger;
 

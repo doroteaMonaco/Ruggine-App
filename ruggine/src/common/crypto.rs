@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Result, anyhow};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -6,6 +8,7 @@ use uuid::Uuid;
 use std::collections::HashMap;
 
 /// Gestore della crittografia end-to-end per i messaggi
+#[allow(dead_code)]
 pub struct CryptoManager {
     rng: SystemRandom,
     /// Chiavi di sessione per gruppi (group_id -> chiave)
@@ -27,6 +30,7 @@ pub struct EncryptedMessage {
 }
 
 /// Chiave di crittografia per un gruppo o chat diretta
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CryptoKey {
     pub key_data: Vec<u8>,
