@@ -39,6 +39,9 @@ cargo run --bin ruggine-server
 # Client GUI (Interfaccia Grafica User-Friendly) - RACCOMANDATO
 cargo run --bin ruggine-gui
 
+# Client Mobile (Android/iOS) - NUOVO
+cargo run --bin ruggine-mobile
+
 # Client Console (per utenti tecnici)
 cargo run --bin ruggine-client
 
