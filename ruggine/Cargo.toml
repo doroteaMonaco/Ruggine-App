@@ -20,6 +20,11 @@ ring = "0.17"
 base64 = "0.22"
 rand = "0.8"
 
+# Mobile GUI framework
+# dioxus = { version = "0.5", features = 
+# ["desktop", "mobile"] }
+# dioxus-mobile = "0.5"
+
 [features]
 default = ["client", "server"]  # Abilita entrambe per default
 server = []
@@ -36,4 +41,8 @@ path = "src/server/main.rs"
 [[bin]]
 name = "ruggine-gui"
 path = "src/client/gui_main.rs"
+
+[[bin]]
+name = "ruggine-mobile"
+path = "src/client/mobile_main.rs"
 
