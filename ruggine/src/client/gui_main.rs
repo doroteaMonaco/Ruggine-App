@@ -3017,7 +3017,10 @@ impl ChatApp {
         // Header con titolo e menu
         let header = row![
             // Titolo della chat
-            text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
+            row![
+                text("💬").font(EMOJI_FONT).size(18),
+                text(format!("💬 Private chat with {}", username)).size(18).font(BOLD_FONT),
+                ],
             // Spacer per spingere il menu a destra
             container(text("")).width(Length::Fill),
             // Menu a tendina in alto a destra
