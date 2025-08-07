@@ -98,11 +98,18 @@ Realizzare un’applicazione in RUST, dal titolo Ruggine, di tipo client/server 
 
 //TODO 
 Gestire bene last_seen
-input area non c'è
 fare login
 trigger per messaggi effimeri
 richieste di amicizia
 eliminare messaggi db troppo vecchi per efficienza
+togliere tutti i debug
+controllare comandi in connection
+elimazione per me o per tutti dei messaggi
+associare orario al messaggio
+risposta ad un messaggio specifico
+invio di immagini, file, emojy in chat
+profilo utente 
+profilo di un gruppo
 
 ![alt text](image.png)
 ![alt text](image-1.png)

@@ -195,6 +195,37 @@ impl DatabaseManager {
         }
     }
 
+    /// Ottieni un gruppo per nome
+    pub async fn get_group_by_name(&self, group_name: &str) -> Result<Option<Group>> {
+        let row = sqlx::query(
+            r#"
+            SELECT g.id, g.name, g.description, g.created_by, g.created_at
+            FROM groups g
+            WHERE g.name = ?
+            "#
+        )
+        .bind(group_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let group_id = Uuid::parse_str(&row.get::<String, _>("id"))?;
+            let members = self.get_group_members(group_id).await?;
+            
+            let group = Group {
+                id: group_id,
+                name: row.get("name"),
+                description: row.get("description"),
+                created_by: Uuid::parse_str(&row.get::<String, _>("created_by"))?,
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
+                members,
+            };
+            Ok(Some(group))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Ottieni i membri di un gruppo
     pub async fn get_group_members(&self, group_id: Uuid) -> Result<Vec<Uuid>> {
         let rows = sqlx::query(
@@ -243,7 +274,7 @@ impl DatabaseManager {
             SELECT id, sender_id, group_id, receiver_id, encrypted_content, nonce, timestamp, message_type
             FROM encrypted_messages
             WHERE group_id = ?
-            ORDER BY timestamp DESC
+            ORDER BY timestamp ASC
             LIMIT ?
             "#
         )
@@ -272,8 +303,7 @@ impl DatabaseManager {
             messages.push(message);
         }
 
-        // Reverse per avere i messaggi in ordine cronologico
-        messages.reverse();
+        // Messaggi già in ordine cronologico corretto (più vecchi prima)
         Ok(messages)
     }
 
@@ -285,7 +315,7 @@ impl DatabaseManager {
             FROM encrypted_messages
             WHERE group_id IS NULL 
               AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))
-            ORDER BY timestamp DESC
+            ORDER BY timestamp ASC
             LIMIT ?
             "#
         )
@@ -318,8 +348,7 @@ impl DatabaseManager {
             messages.push(message);
         }
 
-        // Reverse per avere i messaggi in ordine cronologico
-        messages.reverse();
+        // Messaggi già in ordine cronologico corretto (più vecchi prima)
         Ok(messages)
     }
 
@@ -607,8 +636,8 @@ impl DatabaseManager {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM group_members WHERE user_id = ? AND group_id = ?"
         )
-        .bind(user_id)
-        .bind(group_id)
+        .bind(user_id.to_string())
+        .bind(group_id.to_string())
         .fetch_one(&self.pool)
         .await?;
 
@@ -697,5 +726,38 @@ impl DatabaseManager {
 
         info!("Deleted {} private messages between users {} and {}", deleted_count, user1_id, user2_id);
         Ok(deleted_count)
+    }
+
+    /// Debug method to get all groups
+    pub async fn debug_get_all_groups(&self) -> Result<Vec<(String, String)>> {
+        let groups = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, name FROM groups"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(groups)
+    }
+
+    /// Debug method to get all members of a group
+    pub async fn debug_get_group_members(&self, group_id: Uuid) -> Result<Vec<String>> {
+        let members = sqlx::query_scalar::<_, String>(
+            "SELECT u.username FROM group_members gm JOIN users u ON gm.user_id = u.id WHERE gm.group_id = ?"
+        )
+        .bind(group_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(members)
+    }
+
+    /// Debug method to check membership directly
+    pub async fn debug_check_membership_direct(&self, user_id: Uuid, group_id: Uuid) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM group_members WHERE user_id = ? AND group_id = ?"
+        )
+        .bind(user_id.to_string())
+        .bind(group_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
     }
 }

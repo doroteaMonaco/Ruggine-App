@@ -435,7 +435,39 @@ impl ChatManager {
             messages.push(encrypted_msg.clone());
         }
 
-        info!("Encrypted group message sent by user {}", encrypted_msg.sender_id);
+        // Ottieni informazioni del mittente e del gruppo per le notifiche
+        let sender_username = match self.get_username_by_id(&encrypted_msg.sender_id).await {
+            Some(username) => username,
+            None => {
+                // Se non è in memoria, cerca nel database
+                match self.db_manager.get_user_by_id(encrypted_msg.sender_id).await {
+                    Ok(Some(user)) => user.username,
+                    _ => "Unknown User".to_string(),
+                }
+            }
+        };
+
+        let group_name = match self.db_manager.get_group_by_id(group_id).await {
+            Ok(Some(group)) => group.name,
+            _ => "Unknown Group".to_string(),
+        };
+
+        // Invia notifiche a tutti i membri del gruppo (escluso il mittente)
+        let notification = ClientNotification::NewGroupMessage {
+            group_name: group_name.clone(),
+            group_id,
+            from_username: sender_username,
+            from_id: encrypted_msg.sender_id,
+            message: "New group message".to_string(), // Non possiamo decrittare il messaggio qui
+        };
+
+        for member_id in group_members {
+            if member_id != encrypted_msg.sender_id { // Non inviare notifica al mittente
+                self.send_notification(member_id, notification.clone()).await;
+            }
+        }
+
+        info!("Encrypted group message sent by user {} to group {}", encrypted_msg.sender_id, group_name);
         Ok(())
     }
 
@@ -726,15 +758,47 @@ impl ChatManager {
 
     /// Funzione di compatibilità temporanea per inviare messaggi di gruppo (da rimuovere)
     pub async fn send_group_message(&self, sender_id: Uuid, group_name: String, content: String) -> Result<(), String> {
-        // Trova il gruppo
-        let group_id = {
-            let group_names = self.group_names.read().await;
-            match group_names.get(&group_name) {
-                Some(&id) => id,
-                None => return Err("Group not found".to_string()),
+        // Trova il gruppo usando il metodo che controlla anche il database
+        let group_id = match self.get_group_id_by_name(&group_name).await {
+            Some(id) => id,
+            None => return Err("Group not found".to_string()),
+        };
+
+        // Carica la chiave del gruppo se non è già in memoria
+        {
+            let crypto = self.crypto_manager.read().await;
+            if !crypto.has_group_key(group_id) {
+                drop(crypto);
+                // Prova a caricare la chiave dal database
+                if let Ok(Some(encoded_key)) = self.db_manager.get_group_encryption_key(group_id).await {
+                    let mut crypto_mut = self.crypto_manager.write().await;
+                    if let Err(e) = crypto_mut.import_group_key(group_id, &encoded_key) {
+                        warn!("Failed to import group key: {}", e);
+                        return Err("Failed to load group encryption key".to_string());
+                    }
+                } else {
+                    return Err("Group encryption key not found".to_string());
+                }
+            }
+        }
+
+        // Critta il messaggio usando il CryptoManager
+        let encrypted_msg = {
+            let crypto = self.crypto_manager.read().await;
+            match crypto.encrypt_group_message(group_id, sender_id, &content, MessageType::Text) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("Failed to encrypt group message: {}", e);
+                    return Err(format!("Failed to encrypt message: {}", e));
+                }
             }
         };
 
+        self.send_encrypted_group_message(encrypted_msg).await
+    }
+
+    /// Invia un messaggio di gruppo usando direttamente l'ID del gruppo (più efficiente)
+    pub async fn send_group_message_by_id(&self, sender_id: Uuid, group_id: Uuid, content: String) -> Result<(), String> {
         // Carica la chiave del gruppo se non è già in memoria
         {
             let crypto = self.crypto_manager.read().await;
@@ -866,9 +930,16 @@ impl ChatManager {
         for msg in encrypted_messages {
             match crypto.decrypt_group_message(group_id, &msg) {
                 Ok(content) => {
+                    // Ottieni il nome utente dall'UUID del mittente
+                    let sender_display = match self.db_manager.get_user_by_id(msg.sender_id).await {
+                        Ok(Some(user)) => user.username,
+                        Ok(None) => msg.sender_id.to_string(), // Fallback all'UUID se utente non trovato
+                        Err(_) => msg.sender_id.to_string(), // Fallback all'UUID in caso di errore
+                    };
+                    
                     let formatted_msg = format!("[{}] {}: {}", 
                         msg.timestamp.format("%H:%M:%S"),
-                        msg.sender_id, // Qui dovremmo convertire in username
+                        sender_display,
                         content
                     );
                     decrypted_messages.push(formatted_msg);
@@ -1050,6 +1121,77 @@ impl ChatManager {
                 Ok(deleted_count)
             },
             Err(e) => Err(format!("Failed to delete private messages: {}", e)),
+        }
+    }
+
+    // === UTILITY FUNCTIONS ===
+    /// Get group ID by group name
+    pub async fn get_group_id_by_name(&self, group_name: &str) -> Option<Uuid> {
+        // Prima controlla la cache in memoria
+        {
+            let group_names = self.group_names.read().await;
+            if let Some(&group_id) = group_names.get(group_name) {
+                return Some(group_id);
+            }
+        }
+        
+        // Se non è in cache, cerca nel database
+        match self.db_manager.get_group_by_name(group_name).await {
+            Ok(Some(group)) => {
+                // Aggiorna la cache con il gruppo trovato
+                {
+                    let mut group_names = self.group_names.write().await;
+                    group_names.insert(group_name.to_string(), group.id);
+                    
+                    let mut groups = self.groups.write().await;
+                    groups.insert(group.id, group.clone());
+                }
+                Some(group.id)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!("Failed to get group by name from database: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Get group name by group ID
+    pub async fn get_group_name_by_id(&self, group_id: Uuid) -> Option<String> {
+        // Prima controlla la cache in memoria
+        {
+            let groups = self.groups.read().await;
+            if let Some(group) = groups.get(&group_id) {
+                return Some(group.name.clone());
+            }
+        }
+        
+        // Se non è in cache, cerca nel database
+        match self.db_manager.get_group_by_id(group_id).await {
+            Ok(Some(group)) => {
+                // Aggiorna la cache con il gruppo trovato
+                {
+                    let mut groups = self.groups.write().await;
+                    groups.insert(group.id, group.clone());
+                    
+                    let mut group_names = self.group_names.write().await;
+                    group_names.insert(group.name.clone(), group.id);
+                }
+                Some(group.name)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!("Failed to get group by ID from database: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Check if user is member of a group
+    pub async fn is_user_in_group(&self, user_id: Uuid, group_id: Uuid) -> Result<bool, String> {
+        match self.db_manager.is_user_in_group(user_id, group_id).await {
+            Ok(is_member) => Ok(is_member),
+            Err(e) => Err(format!("Failed to check group membership: {}", e)),
         }
     }
 }
