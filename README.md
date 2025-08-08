@@ -110,6 +110,7 @@ risposta ad un messaggio specifico
 invio di immagini, file, emojy in chat
 profilo utente 
 profilo di un gruppo
+rendere amministaratore un utente di gruppo
 
 ![alt text](image.png)
 ![alt text](image-1.png)

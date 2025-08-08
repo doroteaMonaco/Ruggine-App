@@ -782,10 +782,17 @@ impl ChatManager {
             }
         }
 
+        // Ottieni l'username del sender
+        let sender_username = match self.db_manager.get_user_by_id(sender_id).await {
+            Ok(Some(user)) => user.username,
+            Ok(None) => return Err("Sender not found".to_string()),
+            Err(e) => return Err(format!("Failed to get sender: {}", e)),
+        };
+
         // Critta il messaggio usando il CryptoManager
         let encrypted_msg = {
             let crypto = self.crypto_manager.read().await;
-            match crypto.encrypt_group_message(group_id, sender_id, &content, MessageType::Text) {
+            match crypto.encrypt_group_message(group_id, sender_id, &sender_username, &content, MessageType::Text) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to encrypt group message: {}", e);
@@ -807,6 +814,13 @@ impl ChatManager {
         };
 
         let receiver_id = target_user.id;
+
+        // Ottieni l'username del sender
+        let sender_username = match self.db_manager.get_user_by_id(sender_id).await {
+            Ok(Some(user)) => user.username,
+            Ok(None) => return Err("Sender not found".to_string()),
+            Err(e) => return Err(format!("Failed to get sender: {}", e)),
+        };
 
         // Carica o genera la chiave per la chat diretta
         {
@@ -847,7 +861,7 @@ impl ChatManager {
         // Critta il messaggio usando il CryptoManager
         let encrypted_msg = {
             let crypto = self.crypto_manager.read().await;
-            match crypto.encrypt_direct_message(sender_id, receiver_id, &content, MessageType::Text) {
+            match crypto.encrypt_direct_message(sender_id, &sender_username, receiver_id, &content, MessageType::Text) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to encrypt direct message: {}", e);
@@ -897,7 +911,7 @@ impl ChatManager {
                 Ok(content) => {
                     let formatted_msg = format!("[{}] {}: {}", 
                         msg.timestamp.format("%H:%M:%S"),
-                        msg.sender_id, // Qui dovremmo convertire in username
+                        msg.sender_username, // Ora usiamo direttamente l'username dal database
                         content
                     );
                     decrypted_messages.push(formatted_msg);

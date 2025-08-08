@@ -271,10 +271,12 @@ impl DatabaseManager {
     pub async fn get_encrypted_group_messages(&self, group_id: Uuid, limit: i64) -> Result<Vec<EncryptedMessage>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, sender_id, group_id, receiver_id, encrypted_content, nonce, timestamp, message_type
-            FROM encrypted_messages
-            WHERE group_id = ?
-            ORDER BY timestamp ASC
+            SELECT em.id, em.sender_id, em.group_id, em.receiver_id, em.encrypted_content, 
+                   em.nonce, em.timestamp, em.message_type, u.username as sender_username
+            FROM encrypted_messages em
+            JOIN users u ON em.sender_id = u.id
+            WHERE em.group_id = ?
+            ORDER BY em.timestamp ASC
             LIMIT ?
             "#
         )
@@ -287,6 +289,7 @@ impl DatabaseManager {
         for row in rows {
             let message = EncryptedMessage {
                 sender_id: Uuid::parse_str(&row.get::<String, _>("sender_id"))?,
+                sender_username: row.get("sender_username"),
                 group_id: Some(group_id),
                 receiver_id: row.get::<Option<String>, _>("receiver_id")
                     .map(|id| Uuid::parse_str(&id)).transpose()?,
@@ -311,11 +314,13 @@ impl DatabaseManager {
     pub async fn get_encrypted_direct_messages(&self, user1_id: Uuid, user2_id: Uuid, limit: i64) -> Result<Vec<EncryptedMessage>> {
         let rows = sqlx::query(
             r#"
-            SELECT sender_id, group_id, receiver_id, encrypted_content, nonce, timestamp, message_type
-            FROM encrypted_messages
-            WHERE group_id IS NULL 
-              AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))
-            ORDER BY timestamp ASC
+            SELECT em.sender_id, em.group_id, em.receiver_id, em.encrypted_content, 
+                   em.nonce, em.timestamp, em.message_type, u.username as sender_username
+            FROM encrypted_messages em
+            JOIN users u ON em.sender_id = u.id
+            WHERE em.group_id IS NULL 
+              AND ((em.sender_id = ? AND em.receiver_id = ?) OR (em.sender_id = ? AND em.receiver_id = ?))
+            ORDER BY em.timestamp ASC
             LIMIT ?
             "#
         )
@@ -331,6 +336,7 @@ impl DatabaseManager {
         for row in rows {
             let message = EncryptedMessage {
                 sender_id: Uuid::parse_str(&row.get::<String, _>("sender_id"))?,
+                sender_username: row.get("sender_username"),
                 group_id: None,
                 receiver_id: row.get::<Option<String>, _>("receiver_id")
                     .map(|s| Uuid::parse_str(&s))
@@ -760,4 +766,5 @@ impl DatabaseManager {
         .await?;
         Ok(count)
     }
+
 }

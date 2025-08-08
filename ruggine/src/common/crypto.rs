@@ -23,6 +23,7 @@ pub struct EncryptedMessage {
     pub encrypted_content: String, // Base64 encoded
     pub nonce: String,            // Base64 encoded
     pub sender_id: Uuid,
+    pub sender_username: String,  // Username del sender per evitare lookup aggiuntivi
     pub group_id: Option<Uuid>,
     pub receiver_id: Option<Uuid>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -87,6 +88,7 @@ impl CryptoManager {
         &self,
         group_id: Uuid,
         sender_id: Uuid,
+        sender_username: &str,
         content: &str,
         message_type: crate::common::models::MessageType,
     ) -> Result<EncryptedMessage> {
@@ -99,6 +101,7 @@ impl CryptoManager {
             encrypted_content: BASE64.encode(&encrypted_content),
             nonce: BASE64.encode(&nonce),
             sender_id,
+            sender_username: sender_username.to_string(),
             group_id: Some(group_id),
             receiver_id: None,
             timestamp: chrono::Utc::now(),
@@ -110,6 +113,7 @@ impl CryptoManager {
     pub fn encrypt_direct_message(
         &self,
         sender_id: Uuid,
+        sender_username: &str,
         receiver_id: Uuid,
         content: &str,
         message_type: crate::common::models::MessageType,
@@ -124,6 +128,7 @@ impl CryptoManager {
             encrypted_content: BASE64.encode(&encrypted_content),
             nonce: BASE64.encode(&nonce),
             sender_id,
+            sender_username: sender_username.to_string(),
             group_id: None,
             receiver_id: Some(receiver_id),
             timestamp: chrono::Utc::now(),

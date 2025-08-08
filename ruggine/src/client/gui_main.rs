@@ -411,7 +411,7 @@ pub struct ChatApp {
     // Chat di gruppo
     group_chat_target: Option<(String, String)>, // (group_id, group_name) della chat di gruppo attiva
     group_chat_input: String,                     // Testo del messaggio di gruppo
-    group_messages: std::collections::HashMap<String, Vec<(String, bool)>>, // Cronologia messaggi per gruppo (group_id -> (messaggio, is_sent_by_me))
+    group_messages: std::collections::HashMap<String, Vec<(String, bool, Option<String>)>>, // Cronologia messaggi per gruppo (group_id -> (messaggio, is_sent_by_me, sender_username))
     pending_group_sent_messages: std::collections::HashMap<String, Vec<String>>, // Messaggi di gruppo inviati in attesa (key: group_name)
     
     // Gestione eliminazione messaggi
@@ -1660,8 +1660,10 @@ impl Application for ChatApp {
                 self.group_chat_target = Some((group_id.clone(), group_name.clone()));
                 self.app_state = AppState::GroupChat(group_id, group_name);
                 self.group_chat_input.clear();
-                // Effettua un refresh iniziale dei messaggi del gruppo
+                
                 let mut cmds: Vec<Command<Message>> = Vec::new();
+                
+                // Effettua un refresh iniziale dei messaggi del gruppo
                 let gn_for_refresh = self.group_chat_target.as_ref().map(|(_, gn)| gn.clone());
                 if let Some(gn) = gn_for_refresh {
                     cmds.push(Command::perform(async move { gn }, |gn| Message::RefreshGroupMessages(gn)));
@@ -1728,7 +1730,7 @@ impl Application for ChatApp {
                             self.group_messages
                                 .entry(group_id.clone())
                                 .or_insert_with(Vec::new)
-                                .push((message_text.clone(), true));
+                                .push((message_text.clone(), true, None)); // Nessun sender per i nostri messaggi
                             
                             self.group_chat_input.clear();
                             
@@ -1832,7 +1834,7 @@ impl Application for ChatApp {
                         );
                     } else if server_response.starts_with("[") && server_response.contains(":") {
                         // Messaggio singolo diretto (append)
-                        let (content, is_me) = Self::parse_message_line(
+                        let (content, is_me, sender_username) = Self::parse_group_message_line(
                             server_response.trim(),
                             &self.username,
                             self.current_user_uuid.as_deref(),
@@ -1841,7 +1843,7 @@ impl Application for ChatApp {
 
                         let mut msgs = self.group_messages.get(group_id).cloned().unwrap_or_default();
                         if !content.is_empty() {
-                            msgs.push((content, is_me));
+                            msgs.push((content, is_me, sender_username));
                         }
 
                         if pending.is_empty() {
@@ -3337,8 +3339,20 @@ impl ChatApp {
         } else {
             let message_widgets: Vec<Element<Message>> = messages
                 .iter()
-                .map(|(msg, is_sent_by_me)| {
+                .enumerate()
+                .filter(|(_, (msg, _, _))| {
+                    // Filtra i messaggi di UUID discovery dalla visualizzazione UI
+                    let should_show = !msg.starts_with("__UUID_DISCOVERY_");
+                    if !should_show {
+                        println!("🚫 Filtering out UUID discovery message from UI: {}", msg);
+                    }
+                    should_show
+                })
+                .map(|(i, (msg, is_sent_by_me, sender_username))| {
+                    println!("✅ Rendering UI group message {}: '{}', is_sent_by_me: {}, sender: {:?}", i, msg, is_sent_by_me, sender_username);
+                    
                     if *is_sent_by_me {
+                        // Messaggio inviato da te - allineato a destra con colore verde, senza username
                         container(
                             text(msg)
                                 .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde per i tuoi messaggi
@@ -3350,10 +3364,19 @@ impl ChatApp {
                         .align_x(iced::alignment::Horizontal::Right)
                         .into()
                     } else {
+                        // Messaggio ricevuto - allineato a sinistra con colore blu e username sopra
+                        let unknown_user = "Unknown".to_string();
+                        let sender_display = sender_username.as_ref().unwrap_or(&unknown_user);
+                        
                         container(
-                            text(msg)
-                                .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu per messaggi altrui
-                                .size(14)
+                            column![
+                                text(format!("{}", sender_display))
+                                    .style(Color::from_rgb(0.4, 0.4, 0.4)) // Grigio per il nome utente
+                                    .size(12),
+                                text(msg)
+                                    .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu per il messaggio
+                                    .size(14)
+                            ].spacing(2)
                         )
                         .padding(8)
                         .width(Length::Fill)
@@ -3453,7 +3476,7 @@ impl ChatApp {
         current_username: &str,
         current_user_uuid: Option<&str>,
         pending_messages: &mut Vec<String>,
-    ) -> Vec<(String, bool)> {
+    ) -> Vec<(String, bool, Option<String>)> {
         // Supporta formato:
         // OK: Messages from group 'name':\n
         // [HH:MM:SS] sender: message
@@ -3466,7 +3489,7 @@ impl ChatApp {
             return Vec::new();
         }
 
-        let mut messages: Vec<(String, bool)> = Vec::new();
+        let mut messages: Vec<(String, bool, Option<String>)> = Vec::new();
         let content = response.strip_prefix("OK:").unwrap_or("");
         let mut lines = content.lines();
 
@@ -3475,9 +3498,11 @@ impl ChatApp {
             let first_trim = first.trim();
             if !(first_trim.starts_with("Messages from group") || first_trim.is_empty()) {
                 // Non è un header, processalo come riga di messaggio
-                let (clean, me) = Self::parse_message_line(first_trim, current_username, current_user_uuid, pending_messages);
+                let (clean, me, sender) = Self::parse_group_message_line(
+                    first_trim, current_username, current_user_uuid, pending_messages
+                );
                 if !clean.is_empty() {
-                    messages.push((clean, me));
+                    messages.push((clean, me, sender));
                 }
             }
         }
@@ -3485,13 +3510,132 @@ impl ChatApp {
         for line in lines {
             let l = line.trim();
             if l.is_empty() { continue; }
-            let (clean, me) = Self::parse_message_line(l, current_username, current_user_uuid, pending_messages);
+            let (clean, me, sender) = Self::parse_group_message_line(
+                l, current_username, current_user_uuid, pending_messages
+            );
             if !clean.is_empty() {
-                messages.push((clean, me));
+                messages.push((clean, me, sender));
             }
         }
 
         messages
+    }
+    
+    fn parse_group_message_line(
+        message: &str, 
+        current_username: &str,
+        current_user_uuid: Option<&str>,
+        pending_messages: &mut Vec<String>,
+    ) -> (String, bool, Option<String>) {
+        // Analizza una riga di messaggio di gruppo per determinare chi l'ha inviato e estrarre l'username
+        println!("DEBUG: ===== PARSE GROUP MESSAGE LINE START =====");
+        println!("DEBUG: Input message: '{}'", message);
+        println!("DEBUG: Current username: '{}'", current_username);
+        println!("DEBUG: Current user UUID: {:?}", current_user_uuid);
+        println!("DEBUG: Pending messages: {:?}", pending_messages);
+        
+        // Il formato dei messaggi dal server è: [timestamp] sender_id_or_username: message
+        // Esempio: [16:07:16] 6b85bc68-acc8-4eae-8506-99c73770d624: jjjj
+        // oppure: [16:07:16] alice: message
+        
+        // Prima rimuovi il timestamp se presente
+        let message_without_timestamp = if message.starts_with('[') {
+            if let Some(close_bracket) = message.find(']') {
+                let result = message[close_bracket + 1..].trim().to_string();
+                println!("DEBUG: Removed timestamp, result: '{}'", result);
+                result
+            } else {
+                println!("DEBUG: No closing bracket found for timestamp");
+                message.to_string()
+            }
+        } else {
+            println!("DEBUG: No timestamp bracket found");
+            message.to_string()
+        };
+        
+        if let Some(colon_pos) = message_without_timestamp.find(": ") {
+            let sender = message_without_timestamp[..colon_pos].trim();
+            let content = &message_without_timestamp[colon_pos + 2..];
+            
+            println!("DEBUG: Extracted sender: '{}'", sender);
+            println!("DEBUG: Extracted content: '{}'", content);
+            
+            // Prima strategia: controlla se questo messaggio è stato inviato da noi (è nella lista pending)
+            let is_sent_by_me = if let Some(index) = pending_messages.iter().position(|msg| msg == content) {
+                // Rimuovi dalla lista pending perché l'abbiamo ricevuto dal server
+                pending_messages.remove(index);
+                println!("DEBUG: ✅ Message '{}' found in pending messages at index {} - MARKING AS SENT BY ME", content, index);
+                true
+            } else {
+                println!("DEBUG: ❌ Message '{}' NOT found in pending messages", content);
+                
+                // Strategia fallback: controlla se il mittente è l'utente corrente
+                let fallback_check = if let Some(uuid) = current_user_uuid {
+                    let uuid_match = sender == uuid;
+                    println!("DEBUG: UUID comparison: sender '{}' == current_uuid '{}' -> {}", sender, uuid, uuid_match);
+                    uuid_match
+                } else if sender.len() > 20 && sender.contains('-') {
+                    // Sembra un UUID ma non abbiamo l'UUID dell'utente corrente
+                    println!("DEBUG: Sender looks like UUID but no current_user_uuid available - assuming NOT sent by me");
+                    false
+                } else {
+                    // Confronto normale con username
+                    let username_match = sender == current_username || sender == "You";
+                    println!("DEBUG: Username comparison: sender '{}' == current_username '{}' OR 'You' -> {}", sender, current_username, username_match);
+                    username_match
+                };
+                
+                println!("DEBUG: Fallback check result: {}", fallback_check);
+                fallback_check
+            };
+            
+            // Determina lo username del mittente
+            let sender_username = if is_sent_by_me {
+                None // I nostri messaggi non mostrano username
+            } else {
+                // Il server ora fornisce direttamente gli username, non più UUID
+                Some(sender.to_string())
+            };
+            
+            println!("DEBUG: FINAL RESULT - sender: '{}', content: '{}', is_sent_by_me: {}, sender_username: {:?}", sender, content, is_sent_by_me, sender_username);
+            println!("DEBUG: ===== PARSE GROUP MESSAGE LINE END =====");
+            
+            (content.to_string(), is_sent_by_me, sender_username)
+        } else {
+            // Se non c'è il formato "sender: message", considera come messaggio ricevuto senza mittente
+            println!("DEBUG: No colon found in message, treating as received message without sender");
+            println!("DEBUG: ===== PARSE GROUP MESSAGE LINE END =====");
+            (message_without_timestamp, false, Some("Unknown".to_string()))
+        }
+    }
+    
+    // Funzione helper per risolvere UUID->Username usando il server
+    async fn resolve_uuid_to_username(
+        connection: Arc<Mutex<PersistentConnection>>,
+        uuid: String,
+    ) -> Option<String> {
+        // Proviamo a chiedere al server informazioni sull'UUID usando il nuovo comando
+        let command = format!("/resolve_uuid {}", uuid);
+        
+        match Self::send_command_persistent(connection, command).await {
+            Ok(response) => {
+                // Cerchiamo la risposta nel formato "OK: UUID_RESOLVED: uuid -> username"
+                if response.starts_with("OK: UUID_RESOLVED:") {
+                    // Parse del formato: "OK: UUID_RESOLVED: uuid -> username"
+                    if let Some(arrow_pos) = response.find(" -> ") {
+                        let username = response[arrow_pos + 4..].trim();
+                        println!("DEBUG: Successfully resolved UUID {} to username: {}", uuid, username);
+                        return Some(username.to_string());
+                    }
+                }
+                println!("DEBUG: Failed to parse UUID resolution response: {}", response);
+                None
+            }
+            Err(e) => {
+                println!("DEBUG: Failed to resolve UUID {}: {}", uuid, e);
+                None
+            }
+        }
     }
     
     // Background listener per le notifiche dal server - SUPER OTTIMIZZATO
