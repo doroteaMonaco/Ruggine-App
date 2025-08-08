@@ -1,6 +1,6 @@
 use iced::{
     widget::{button, column, container, row, text, text_input, radio, scrollable},
-    Application, Command, Element, Length, Settings, Theme, Font, Color,
+    Application, Command, Element, Length, Settings, Theme, Font,
 };
 use log::error;
 use std::sync::Arc;
@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufWriter, BufReader};
 use sqlx::{sqlite::SqlitePool, Row};
-use chrono::{DateTime, Utc};
 
 use ruggine::client::config::ClientConfig;
 
@@ -294,7 +293,7 @@ pub enum Message {
     CloseGroupChat,
     GroupChatInputChanged(String),
     SendGroupMessage,
-    RefreshGroupMessages(String, String), // (group_id, group_name) - ricarica messaggi di gruppo dal server
+    RefreshGroupMessages(String), // group_name - ricarica messaggi di gruppo dal server
     UpdateGroupMessagesFromServer(String, String), // (group_name, server_response)
     
     // Gestione eliminazione messaggi
@@ -328,49 +327,6 @@ pub enum AlertType {
 pub struct Alert {
     message: String,
     alert_type: AlertType,
-}
-
-#[derive(Debug, Clone)]
-pub struct GroupMessage {
-    pub content: String,
-    pub sender: String,
-    pub timestamp: String,
-    pub is_from_current_user: bool,
-}
-
-impl GroupMessage {
-    pub fn parse_from_server_response(response: &str, current_username: &str, current_user_uuid: Option<&str>) -> Option<Self> {
-        // Formato: "[16:04:00] username/uuid: message content"
-        if let Some(bracket_end) = response.find(']') {
-            let time_part = &response[1..bracket_end];
-            let rest = &response[bracket_end + 1..].trim();
-            
-            if let Some(colon_pos) = rest.find(':') {
-                let sender_field = rest[..colon_pos].trim();
-                let content = rest[colon_pos + 1..].trim().to_string();
-                
-                // Determina se il messaggio è dell'utente corrente
-                let is_from_current_user = sender_field == current_username || 
-                    (current_user_uuid.is_some() && Some(sender_field) == current_user_uuid);
-                
-                // Se è un UUID, prova a convertirlo in nome utente per la visualizzazione
-                // Per ora mostriamo il sender_field così com'è, ma potremmo mappare UUID -> username
-                let display_sender = if is_from_current_user {
-                    current_username.to_string()
-                } else {
-                    sender_field.to_string()
-                };
-                
-                return Some(GroupMessage {
-                    content,
-                    sender: display_sender,
-                    timestamp: time_part.to_string(),
-                    is_from_current_user,
-                });
-            }
-        }
-        None
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -455,7 +411,8 @@ pub struct ChatApp {
     // Chat di gruppo
     group_chat_target: Option<(String, String)>, // (group_id, group_name) della chat di gruppo attiva
     group_chat_input: String,                     // Testo del messaggio di gruppo
-    group_messages: std::collections::HashMap<String, Vec<GroupMessage>>, // Cronologia messaggi per gruppo (group_id -> messaggi)
+    group_messages: std::collections::HashMap<String, Vec<(String, bool)>>, // Cronologia messaggi per gruppo (group_id -> (messaggio, is_sent_by_me))
+    pending_group_sent_messages: std::collections::HashMap<String, Vec<String>>, // Messaggi di gruppo inviati in attesa (key: group_name)
     
     // Gestione eliminazione messaggi
     delete_confirmation: Option<DeleteConfirmation>,
@@ -537,6 +494,7 @@ impl Application for ChatApp {
                 group_chat_target: None,
                 group_chat_input: String::new(),
                 group_messages: std::collections::HashMap::new(),
+                pending_group_sent_messages: std::collections::HashMap::new(),
                 delete_confirmation: None,
                 config,
             },
@@ -759,6 +717,7 @@ impl Application for ChatApp {
                 self.group_chat_target = None;
                 self.group_chat_input.clear();
                 self.group_messages.clear();
+                self.pending_group_sent_messages.clear();
                 self.delete_confirmation = None;
                 
                 Command::perform(async {}, |_| Message::ShowAlert(
@@ -1634,11 +1593,9 @@ impl Application for ChatApp {
                         
                         if !group_name.is_empty() {
                             // Trova l'ID del gruppo
-                            if let Some((group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
+                            if let Some((_group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
                                 // Aggiorna i messaggi quando arriva una notifica
-                                let group_id_clone = group_id.clone();
-                                let group_name_clone = group_name.clone();
-                                commands.push(Command::perform(async move { (group_id_clone, group_name_clone) }, |(group_id, group_name)| Message::RefreshGroupMessages(group_id, group_name)));
+                                commands.push(Command::perform(async move { group_name.clone() }, |group_name| Message::RefreshGroupMessages(group_name)));
                             }
                         }
                     }
@@ -1701,26 +1658,44 @@ impl Application for ChatApp {
             // Chat di gruppo
             Message::StartGroupChat(group_id, group_name) => {
                 self.group_chat_target = Some((group_id.clone(), group_name.clone()));
-                self.app_state = AppState::GroupChat(group_id.clone(), group_name.clone());
+                self.app_state = AppState::GroupChat(group_id, group_name);
                 self.group_chat_input.clear();
-                
-                // NUOVA FUNZIONALITÀ: Carica automaticamente i messaggi esistenti quando entri nella chat
-                if let Some(connection) = &self.persistent_connection {
-                    let conn = connection.clone();
-                    let command = format!("/get_group_messages {}", group_id);
-                    
-                    return Command::perform(
-                        Self::send_command_persistent(conn, command),
-                        move |result| {
-                            match result {
-                                Ok(response) => Message::UpdateGroupMessagesFromServer(group_name.clone(), response),
-                                Err(_) => Message::UpdateGroupMessagesFromServer(group_name.clone(), "Error loading messages".to_string())
-                            }
-                        }
-                    );
+                // Effettua un refresh iniziale dei messaggi del gruppo
+                let mut cmds: Vec<Command<Message>> = Vec::new();
+                let gn_for_refresh = self.group_chat_target.as_ref().map(|(_, gn)| gn.clone());
+                if let Some(gn) = gn_for_refresh {
+                    cmds.push(Command::perform(async move { gn }, |gn| Message::RefreshGroupMessages(gn)));
                 }
-                
-                Command::none()
+
+                // Se non conosciamo ancora il nostro UUID, invia un messaggio di discovery nel gruppo
+                if self.current_user_uuid.is_none() {
+                    if let Some((_, gn)) = &self.group_chat_target {
+                        if let Some(connection) = &self.persistent_connection {
+                            let conn = connection.clone();
+                            let discovery_message = format!(
+                                "__UUID_DISCOVERY_{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                            );
+                            // Traccia nei pending per poter individuare il nostro mittente
+                            self.pending_group_sent_messages
+                                .entry(gn.clone())
+                                .or_insert_with(Vec::new)
+                                .push(discovery_message.clone());
+
+                            let command = format!("/send {} {}", gn, discovery_message);
+                            let gn_clone = gn.clone();
+                            cmds.push(Command::perform(
+                                Self::send_command_persistent(conn, command),
+                                move |_| Message::RefreshGroupMessages(gn_clone),
+                            ));
+                        }
+                    }
+                }
+
+                Command::batch(cmds)
             }
             
             Message::CloseGroupChat => {
@@ -1740,35 +1715,52 @@ impl Application for ChatApp {
                     if !self.group_chat_input.trim().is_empty() {
                         if let Some(connection) = &self.persistent_connection {
                             let conn = connection.clone();
-                            // NUOVO FORMATO: Usa group_id|group_name per il comando /send
-                            let message = format!("/send {}|{} {}", group_id, group_name, self.group_chat_input);
+                            let message_text = self.group_chat_input.trim().to_string();
+                            let command = format!("/send {} {}", group_name, message_text);
                             
-                            // Salva i dati per il refresh successivo
-                            let group_id_for_refresh = group_id.clone();
-                            let group_name_for_refresh = group_name.clone();
+                            // Traccia il messaggio come "in attesa" per riconoscerlo al refresh
+                            self.pending_group_sent_messages
+                                .entry(group_name.clone())
+                                .or_insert_with(Vec::new)
+                                .push(message_text.clone());
+
+                            // Aggiungi un'eco locale immediata (opzionale)
+                            self.group_messages
+                                .entry(group_id.clone())
+                                .or_insert_with(Vec::new)
+                                .push((message_text.clone(), true));
                             
                             self.group_chat_input.clear();
                             
-                            return Command::perform(
-                                Self::send_command_persistent(conn, message),
-                                move |result| match result {
-                                    Ok(_) => {
-                                        // Dopo l'invio riuscito, aggiorna i messaggi dal server
-                                        Message::RefreshGroupMessages(group_id_for_refresh, group_name_for_refresh)
-                                    },
+                            let send_cmd = Command::perform(
+                                Self::send_command_persistent(conn, command),
+                                |result| match result {
+                                    Ok(_) => Message::ShowAlert("Message sent".to_string(), AlertType::Success),
                                     Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
                                 }
                             );
+
+                            // Piccolo delay e refresh per vedere i messaggi dal server
+                            let group_name_for_refresh = group_name.clone();
+                            let refresh_cmd = Command::perform(
+                                async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                                    group_name_for_refresh
+                                },
+                                |gn| Message::RefreshGroupMessages(gn)
+                            );
+
+                            return Command::batch(vec![send_cmd, refresh_cmd]);
                         }
                     }
                 }
                 Command::none()
             }
             
-            Message::RefreshGroupMessages(group_id, group_name) => {
+            Message::RefreshGroupMessages(group_name) => {
                 if let Some(connection) = &self.persistent_connection {
                     let conn = connection.clone();
-                    let command = format!("/get_group_messages {}", group_id);
+                    let command = format!("/get_group_messages {}", group_name);
                     
                     return Command::perform(
                         Self::send_command_persistent(conn, command),
@@ -1787,56 +1779,82 @@ impl Application for ChatApp {
                 println!("Updating group messages from server for {}: {}", group_name, server_response);
                 
                 // Parse la risposta del server e aggiorna i messaggi per questo gruppo
-                if server_response.starts_with("OK:") {
-                    let content = server_response.strip_prefix("OK:").unwrap_or("").trim();
-                    
-                    if !content.is_empty() && !content.contains("No messages found") {
-                        // Trova l'ID del gruppo dalla lista dei gruppi dell'utente
-                        if let Some((group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
-                            let lines: Vec<&str> = content.lines().collect();
-                            
-                            // Se abbiamo solo l'header "Messages from group 'name':" senza messaggi
-                            if lines.len() <= 1 {
-                                self.group_messages.insert(group_id.clone(), Vec::new());
-                                println!("Updated 0 group messages for group: {}", group_name);
-                            } else {
-                                let messages: Vec<GroupMessage> = lines
-                                    .iter()
-                                    .skip(1) // Salta la prima linea "Messages from group 'name':"
-                                    .filter(|line| !line.trim().is_empty())
-                                    .filter_map(|line| GroupMessage::parse_from_server_response(line, &self.username, self.current_user_uuid.as_deref()))
-                                    .collect();
-                                
-                                // Aggiorna i messaggi per questo gruppo
-                                self.group_messages.insert(group_id.clone(), messages);
-                                println!("Updated {} group messages for group: {}", self.group_messages.get(group_id).map(|m| m.len()).unwrap_or(0), group_name);
+                if let Some((group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
+                    // Ottieni e clona i pending per questo gruppo (chiave: group_name)
+                    let mut pending = self
+                        .pending_group_sent_messages
+                        .get(&group_name)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    if server_response.starts_with("OK:") {
+                        // Se non abbiamo ancora l'UUID dell'utente corrente, proviamo a inferirlo
+                        if self.current_user_uuid.is_none() && !pending.is_empty() {
+                            'outer: for line in server_response.lines() {
+                                for pending_msg in &pending {
+                                    if line.contains(pending_msg) {
+                                        if let Some(colon_pos) = line.rfind(": ") {
+                                            let before_colon = &line[..colon_pos];
+                                            if let Some(bracket_pos) = before_colon.rfind("] ") {
+                                                let uuid_part = &before_colon[bracket_pos + 2..];
+                                                if uuid_part.len() > 20 && uuid_part.contains('-') {
+                                                    println!("DISCOVERED current user UUID from group: '{}'", uuid_part);
+                                                    self.current_user_uuid = Some(uuid_part.to_string());
+                                                    break 'outer;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        // Nessun messaggio trovato, inizializza con lista vuota
-                        if let Some((group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
-                            self.group_messages.insert(group_id.clone(), Vec::new());
-                        }
-                    }
-                } else if server_response.starts_with("[") && server_response.contains(":") {
-                    // Questo potrebbe essere un messaggio diretto senza il prefisso "OK:"
-                    // Formato: "[16:04:00] uuid: message"
-                    println!("Processing direct message response: {}", server_response);
-                    
-                    if let Some((group_id, _)) = self.my_groups.iter().find(|(_, name)| name == &group_name) {
-                        // Prova a parsare come GroupMessage
-                        if let Some(group_message) = GroupMessage::parse_from_server_response(&server_response, &self.username, self.current_user_uuid.as_deref()) {
-                            // Aggiungi questo messaggio alla lista esistente
-                            let mut messages = self.group_messages.get(group_id).cloned().unwrap_or_default();
-                            messages.push(group_message);
-                            self.group_messages.insert(group_id.clone(), messages);
-                            println!("Added direct message to group {}: {}", group_name, server_response);
+
+                        // Usa un parser dedicato che sfrutta parse_message_line
+                        let parsed = Self::parse_group_messages_response(
+                            &server_response,
+                            &self.username,
+                            self.current_user_uuid.as_deref(),
+                            &mut pending,
+                        );
+
+                        // Aggiorna pending residui
+                        if pending.is_empty() {
+                            self.pending_group_sent_messages.remove(&group_name);
                         } else {
-                            println!("Failed to parse direct message: {}", server_response);
+                            self.pending_group_sent_messages.insert(group_name.clone(), pending);
                         }
+
+                        self.group_messages.insert(group_id.clone(), parsed);
+                        println!(
+                            "Updated {} group messages for group: {}",
+                            self.group_messages.get(group_id).map(|m| m.len()).unwrap_or(0),
+                            group_name
+                        );
+                    } else if server_response.starts_with("[") && server_response.contains(":") {
+                        // Messaggio singolo diretto (append)
+                        let (content, is_me) = Self::parse_message_line(
+                            server_response.trim(),
+                            &self.username,
+                            self.current_user_uuid.as_deref(),
+                            &mut pending,
+                        );
+
+                        let mut msgs = self.group_messages.get(group_id).cloned().unwrap_or_default();
+                        if !content.is_empty() {
+                            msgs.push((content, is_me));
+                        }
+
+                        if pending.is_empty() {
+                            self.pending_group_sent_messages.remove(&group_name);
+                        } else {
+                            self.pending_group_sent_messages.insert(group_name.clone(), pending);
+                        }
+
+                        self.group_messages.insert(group_id.clone(), msgs);
+                        println!("Appended direct group message for {}", group_name);
+                    } else {
+                        println!("Error or empty response from server for group {}: {}", group_name, server_response);
                     }
-                } else {
-                    println!("Error response from server: {}", server_response);
                 }
                 
                 Command::none()
@@ -2603,15 +2621,15 @@ impl ChatApp {
         connection: Arc<Mutex<PersistentConnection>>, 
         command: String
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // SUPER OTTIMIZZATO: Timeout ridotti per maggiore velocità
+        // OTTIMIZZATO: Timeout aumentato e attesa invece di errore
         let mut conn = match tokio::time::timeout(
-            tokio::time::Duration::from_millis(500), 
+            tokio::time::Duration::from_millis(2000), 
             connection.lock()
         ).await {
             Ok(conn) => conn,
             Err(_) => {
                 // Invece di restituire errore, attendi di più
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 connection.lock().await
             },
         };
@@ -2623,12 +2641,12 @@ impl ChatApp {
         conn.writer.write_all(b"\n").await?;
         conn.writer.flush().await?;
         
-        // SUPER OTTIMIZZATO: Timeout ridotto a 300ms per risposta più veloce
+        // OTTIMIZZATO: Timeout ridotto per lettura più veloce (da 2s a 1s)
         let mut full_response = String::new();
         let mut first_line = String::new();
         
         match tokio::time::timeout(
-            tokio::time::Duration::from_millis(300), 
+            tokio::time::Duration::from_millis(1000), 
             conn.reader.read_line(&mut first_line)
         ).await {
             Ok(Ok(_)) => {},
@@ -2643,7 +2661,7 @@ impl ChatApp {
             println!("Received notification, reading actual response...");
             // Questa è una notifica, leggi la vera risposta al comando
             match tokio::time::timeout(
-                tokio::time::Duration::from_millis(200), // SUPER OTTIMIZZATO: Ridotto a 200ms
+                tokio::time::Duration::from_millis(500), // OTTIMIZZATO: Ridotto da 1s a 500ms
                 conn.reader.read_line(&mut first_line)
             ).await {
                 Ok(Ok(_)) => {},
@@ -2666,10 +2684,10 @@ impl ChatApp {
             
             println!("Multi-line response detected, reading additional lines...");
             
-            // SUPER OTTIMIZZATO: Timeout ridotto per righe aggiuntive a 100ms
+            // OTTIMIZZATO: Timeout ridotto per righe aggiuntive (da 200ms a 150ms)
             loop {
                 let mut line = String::new();
-                match tokio::time::timeout(tokio::time::Duration::from_millis(100), conn.reader.read_line(&mut line)).await {
+                match tokio::time::timeout(tokio::time::Duration::from_millis(150), conn.reader.read_line(&mut line)).await {
                     Ok(Ok(0)) => break, // Connessione chiusa
                     Ok(Ok(_)) => {
                         println!("Additional line: {}", line.trim());
@@ -3305,85 +3323,55 @@ impl ChatApp {
     }
     
     fn view_group_chat(&self, group_id: &str, group_name: &str) -> Element<Message> {
-        use iced::widget::{button, column, container, row, text, text_input, scrollable};
-        use iced::{Alignment, Element, Length, Color};
+    use iced::widget::{button, column, container, row, text, text_input, scrollable};
+    use iced::{Alignment, Element, Length, Color};
         
         let empty_messages = Vec::new();
-        let messages = self.group_messages.get(group_id).unwrap_or(&empty_messages);
-        
-        // Header con titolo e menu (uguale alla chat privata)
-        let header = row![
-            // Titolo della chat
-            row![
-                text("👥").font(EMOJI_FONT).size(18),
-                text(format!("Group chat: {}", group_name)).size(18).font(BOLD_FONT),
-            ],
-            // Spacer per spingere il menu a destra
-            container(text("")).width(Length::Fill),
-            // Menu a tendina per le azioni della chat
-            column![
-                button(text("🗑️").font(EMOJI_FONT))
-                    .on_press(Message::DeleteGroupMessages(group_id.to_string()))
-                    .padding(5)
-                    .style(iced::theme::Button::Destructive),
-            ]
-            .align_items(Alignment::End)
-        ]
-        .spacing(10)
-        .align_items(Alignment::Center);
+    let messages = self.group_messages.get(group_id).unwrap_or(&empty_messages);
         
         let messages_area = if messages.is_empty() {
-            scrollable(
-                column![
-                    text("No messages yet. Start the conversation!").size(14),
-                ].spacing(10)
-            ).height(Length::Fixed(300.0))
+            column![
+                text(format!("👥 Group chat: {}", group_name)).size(18).font(BOLD_FONT),
+                text("No messages yet. Start the conversation!").size(14),
+            ].spacing(10)
         } else {
-            println!("Rendering {} group messages for {}", messages.len(), group_name);
-            
             let message_widgets: Vec<Element<Message>> = messages
                 .iter()
-                .enumerate()
-                .map(|(i, msg)| {
-                    println!("✅ Rendering group UI message {}: '{}' from '{}', is_from_current_user: {}", 
-                        i, msg.content, msg.sender, msg.is_from_current_user);
-                    
-                    if msg.is_from_current_user {
-                        // Messaggio inviato da te - allineato a destra con colore verde (uguale alla chat privata)
+                .map(|(msg, is_sent_by_me)| {
+                    if *is_sent_by_me {
                         container(
-                            column![
-                                text(&msg.content).size(14),
-                                text(&msg.timestamp).size(11).style(Color::from_rgb(0.6, 0.6, 0.6))
-                            ].spacing(2)
+                            text(msg)
+                                .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde per i tuoi messaggi
+                                .size(14)
                         )
                         .padding(8)
                         .width(Length::Fill)
-                        .style(iced::theme::Container::Custom(Box::new(GreenBubbleStyle)))
+                        .style(iced::theme::Container::Box)
                         .align_x(iced::alignment::Horizontal::Right)
                         .into()
                     } else {
-                        // Messaggio ricevuto da altri - allineato a sinistra con colore grigio e nome utente
                         container(
-                            column![
-                                text(&msg.sender).size(12).font(BOLD_FONT).style(Color::from_rgb(0.0, 0.5, 1.0)),
-                                text(&msg.content).size(14),
-                                text(&msg.timestamp).size(11).style(Color::from_rgb(0.6, 0.6, 0.6))
-                            ].spacing(2)
+                            text(msg)
+                                .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu per messaggi altrui
+                                .size(14)
                         )
                         .padding(8)
                         .width(Length::Fill)
-                        .style(iced::theme::Container::Custom(Box::new(GrayBubbleStyle)))
+                        .style(iced::theme::Container::Box)
                         .align_x(iced::alignment::Horizontal::Left)
                         .into()
                     }
                 })
                 .collect();
-                
-            scrollable(
-                column(message_widgets)
-                    .spacing(5)
-                    .padding(10)
-            ).height(Length::Fixed(300.0))
+
+            column![
+                text(format!("👥 Group chat: {}", group_name)).size(18).font(BOLD_FONT),
+                scrollable(
+                    column(message_widgets)
+                        .spacing(5)
+                        .padding(10)
+                ).height(Length::Fixed(300.0))
+            ].spacing(10)
         };
         
         let input_section = row![
@@ -3401,15 +3389,23 @@ impl ChatApp {
             .on_press(Message::CloseGroupChat)
             .padding(5);
 
+        // Menu a tendina per le azioni della chat
+        let chat_actions = row![
+            button(text("🗑️ Delete Messages").font(EMOJI_FONT))
+                .on_press(Message::DeleteGroupMessages(group_id.to_string()))
+                .padding(5)
+                .style(iced::theme::Button::Destructive),
+        ].spacing(10);
+
         // Controllo se c'è una finestra di conferma di eliminazione
         let content = if let Some(ref confirmation) = self.delete_confirmation {
             if matches!(confirmation.delete_type, DeleteType::GroupMessages) && confirmation.target == group_id {
                 // Mostra dialog di conferma
                 column![
                     back_button,
-                    header,
                     messages_area,
                     input_section,
+                    chat_actions,
                     container(
                         column![
                             text("⚠️ Delete All Messages").size(18).font(BOLD_FONT),
@@ -3430,21 +3426,19 @@ impl ChatApp {
                     .style(iced::theme::Container::Box)
                 ].spacing(20).padding(20)
             } else {
-                // Layout normale senza dialog
                 column![
                     back_button,
-                    header,
                     messages_area,
                     input_section,
+                    chat_actions,
                 ].spacing(20).padding(20)
             }
         } else {
-            // Layout normale senza dialog
             column![
                 back_button,
-                header,
                 messages_area,
                 input_section,
+                chat_actions,
             ].spacing(20).padding(20)
         };
         
@@ -3452,7 +3446,55 @@ impl ChatApp {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
-    }    // Background listener per le notifiche dal server - SUPER OTTIMIZZATO
+    }
+
+    fn parse_group_messages_response(
+        response: &str,
+        current_username: &str,
+        current_user_uuid: Option<&str>,
+        pending_messages: &mut Vec<String>,
+    ) -> Vec<(String, bool)> {
+        // Supporta formato:
+        // OK: Messages from group 'name':\n
+        // [HH:MM:SS] sender: message
+        // oppure eventuale "No messages found"
+        if !response.starts_with("OK:") {
+            return Vec::new();
+        }
+
+        if response.contains("No messages found") {
+            return Vec::new();
+        }
+
+        let mut messages: Vec<(String, bool)> = Vec::new();
+        let content = response.strip_prefix("OK:").unwrap_or("");
+        let mut lines = content.lines();
+
+        // Se la prima riga è un header, saltala
+        if let Some(first) = lines.next() {
+            let first_trim = first.trim();
+            if !(first_trim.starts_with("Messages from group") || first_trim.is_empty()) {
+                // Non è un header, processalo come riga di messaggio
+                let (clean, me) = Self::parse_message_line(first_trim, current_username, current_user_uuid, pending_messages);
+                if !clean.is_empty() {
+                    messages.push((clean, me));
+                }
+            }
+        }
+
+        for line in lines {
+            let l = line.trim();
+            if l.is_empty() { continue; }
+            let (clean, me) = Self::parse_message_line(l, current_username, current_user_uuid, pending_messages);
+            if !clean.is_empty() {
+                messages.push((clean, me));
+            }
+        }
+
+        messages
+    }
+    
+    // Background listener per le notifiche dal server - SUPER OTTIMIZZATO
     async fn background_notification_listener(connection: Arc<Mutex<PersistentConnection>>) -> String {
         use tokio::time::{timeout, Duration};
         
@@ -3486,55 +3528,6 @@ impl ChatApp {
                 // Timeout, continua ad ascoltare senza delay aggiuntivo
                 "CONTINUE_LISTENING".to_string()
             }
-        }
-    }
-}
-
-// Stili personalizzati per le bolle dei messaggi
-#[derive(Debug, Clone)]
-struct GreenBubbleStyle;
-
-impl iced::widget::container::StyleSheet for GreenBubbleStyle {
-    type Style = iced::Theme;
-
-    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
-        iced::widget::container::Appearance {
-            background: Some(iced::Background::Color(Color::from_rgb(0.8, 1.0, 0.8))), // Verde chiaro
-            border: iced::Border {
-                color: Color::from_rgb(0.6, 0.9, 0.6),
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            text_color: Some(Color::BLACK),
-            shadow: iced::Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.1),
-                offset: iced::Vector::new(0.0, 2.0),
-                blur_radius: 4.0,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct GrayBubbleStyle;
-
-impl iced::widget::container::StyleSheet for GrayBubbleStyle {
-    type Style = iced::Theme;
-
-    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
-        iced::widget::container::Appearance {
-            background: Some(iced::Background::Color(Color::from_rgb(0.95, 0.95, 0.95))), // Grigio chiaro
-            border: iced::Border {
-                color: Color::from_rgb(0.8, 0.8, 0.8),
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            text_color: Some(Color::BLACK),
-            shadow: iced::Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.1),
-                offset: iced::Vector::new(0.0, 2.0),
-                blur_radius: 4.0,
-            },
         }
     }
 }

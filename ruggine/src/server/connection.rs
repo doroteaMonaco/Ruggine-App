@@ -60,10 +60,10 @@ async fn send_help(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> R
 /my_invites              - List pending invites
 /join_group <group_name> - Join a group chat
 /leave_group <group_name> - Leave a group
-/send <group_id|group_name> <message> - Send message to group
+/send <group_name> <message> - Send message to group
 /send_private <username> <message> - Send private message
 /private <username> <message> - Send private message (alternative)
-/get_group_messages <group_id> - Get messages from a group chat
+/get_group_messages <group_name> - Get messages from a group chat
 /get_private_messages <username> - Get private messages with a user
 /delete_group_messages <group_id> - Delete all messages from a group chat
 /delete_private_messages <username> - Delete all messages from a private chat
@@ -256,42 +256,14 @@ async fn process_command(
                 return Ok(());
             }
             if parts.len() < 3 {
-                send_error(writer, "Usage: /send <group_id|group_name> <message>").await?;
+                send_error(writer, "Usage: /send <group_name> <message>").await?;
                 return Ok(());
             }
             
-            // Parse group identifier (può essere "group_id|group_name" oppure solo "group_name" per compatibilità)
-            let group_identifier = parts[1].to_string();
+            let group_name = parts[1].to_string();
             let message = parts[2..].join(" ");
             
-            let (group_id, group_name) = if group_identifier.contains('|') {
-                // Nuovo formato: "group_id|group_name"
-                let parts: Vec<&str> = group_identifier.split('|').collect();
-                if parts.len() == 2 {
-                    match Uuid::parse_str(parts[0]) {
-                        Ok(id) => (id, parts[1].to_string()),
-                        Err(_) => {
-                            send_error(writer, &format!("Invalid group ID format: {}", parts[0])).await?;
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    send_error(writer, "Invalid group identifier format. Use: group_id|group_name").await?;
-                    return Ok(());
-                }
-            } else {
-                // Vecchio formato per compatibilità: solo "group_name"
-                let group_name = group_identifier;
-                match chat_manager.get_group_id_by_name(&group_name).await {
-                    Some(id) => (id, group_name),
-                    None => {
-                        send_error(writer, &format!("Group '{}' not found", group_name)).await?;
-                        return Ok(());
-                    }
-                }
-            };
-            
-            match chat_manager.send_group_message_by_id(user_id.unwrap(), group_id, message).await {
+            match chat_manager.send_group_message(user_id.unwrap(), group_name.clone(), message).await {
                 Ok(_) => {
                     send_success(writer, &format!("Message sent to group '{}'", group_name)).await?;
                 }
@@ -563,23 +535,20 @@ async fn process_command(
                 return Ok(());
             }
             if parts.len() != 2 {
-                send_error(writer, "Usage: /get_group_messages <group_id>").await?;
+                send_error(writer, "Usage: /get_group_messages <group_name>").await?;
                 return Ok(());
             }
 
-            // Parse group ID direttamente (invece del nome)
-            let group_id_str = parts[1].to_string();
-            let group_id = match Uuid::parse_str(&group_id_str) {
-                Ok(id) => id,
-                Err(_) => {
-                    send_error(writer, &format!("Invalid group ID format: {}", group_id_str)).await?;
+            let group_name = parts[1].to_string();
+            
+            // Trova il gruppo
+            let group_id = match chat_manager.get_group_id_by_name(&group_name).await {
+                Some(id) => id,
+                None => {
+                    send_error(writer, &format!("Group '{}' not found", group_name)).await?;
                     return Ok(());
                 }
             };
-            
-            // Ottieni il nome del gruppo per la risposta (opzionale)
-            let group_name = chat_manager.get_group_name_by_id(group_id).await
-                .unwrap_or_else(|| group_id.to_string());
 
             // Verifica che l'utente sia membro del gruppo
             match chat_manager.is_user_in_group(user_id.unwrap(), group_id).await {
