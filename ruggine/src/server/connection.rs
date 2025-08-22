@@ -67,6 +67,15 @@ async fn send_help(writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>) -> R
 /get_private_messages <username> - Get private messages with a user
 /delete_group_messages <group_id> - Delete all messages from a group chat
 /delete_private_messages <username> - Delete all messages from a private chat
+
+=== Friendship System ===
+/send_friend_request <username> [message] - Send a friend request
+/accept_friend_request <username> - Accept a friend request
+/reject_friend_request <username> - Reject a friend request
+/list_friends            - List your friends
+/received_friend_requests - Show pending friend requests received
+/sent_friend_requests    - Show pending friend requests sent
+
 /save                    - Save server data to file (admin only)
 /help                    - Show this help
 /quit                    - Disconnect
@@ -78,6 +87,9 @@ Example usage:
   /send friends Hello everyone!
   /get_group_messages friends
   /private alice Hi there!
+  /send_friend_request bob Want to be friends?
+  /accept_friend_request alice
+```
   /get_private_messages alice
   /delete_group_messages <group_id>
   /delete_private_messages alice
@@ -614,6 +626,150 @@ async fn process_command(
                 }
                 Ok(true) => {
                     send_success(writer, &format!("You have joined the group chat '{}'. Use /get_group_messages {} to see messages and /send {} <message> to send messages.", group_name, group_name, group_name)).await?;
+                }
+            }
+        }
+        "/send_friend_request" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() < 2 {
+                send_error(writer, "Usage: /send_friend_request <username> [message]").await?;
+                return Ok(());
+            }
+
+            let target_username = parts[1].to_string();
+            let message = if parts.len() > 2 {
+                Some(parts[2..].join(" "))
+            } else {
+                None
+            };
+
+            match chat_manager.send_friend_request(user_id.unwrap(), &target_username, message).await {
+                Ok(_) => {
+                    send_success(writer, &format!("Friend request sent to '{}'", target_username)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to send friend request: {}", e)).await?;
+                }
+            }
+        }
+        "/accept_friend_request" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /accept_friend_request <username>").await?;
+                return Ok(());
+            }
+
+            let sender_username = parts[1].to_string();
+            match chat_manager.accept_friend_request(user_id.unwrap(), &sender_username).await {
+                Ok(_) => {
+                    send_success(writer, &format!("Friend request from '{}' accepted. You are now friends!", sender_username)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to accept friend request: {}", e)).await?;
+                }
+            }
+        }
+        "/reject_friend_request" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+            if parts.len() != 2 {
+                send_error(writer, "Usage: /reject_friend_request <username>").await?;
+                return Ok(());
+            }
+
+            let sender_username = parts[1].to_string();
+            match chat_manager.reject_friend_request(user_id.unwrap(), &sender_username).await {
+                Ok(_) => {
+                    send_success(writer, &format!("Friend request from '{}' rejected", sender_username)).await?;
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to reject friend request: {}", e)).await?;
+                }
+            }
+        }
+        "/list_friends" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+
+            match chat_manager.get_user_friends(user_id.unwrap()).await {
+                Ok(friends) => {
+                    if friends.is_empty() {
+                        send_success(writer, "You have no friends yet. Send friend requests to start connecting!").await?;
+                    } else {
+                        let mut response = String::from("Your friends:\n");
+                        for friend in friends {
+                            let status = if friend.is_online { "🟢 Online" } else { "⚫ Offline" };
+                            response.push_str(&format!("  {} - {}\n", friend.username, status));
+                        }
+                        send_success(writer, &response.trim()).await?;
+                    }
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to get friends list: {}", e)).await?;
+                }
+            }
+        }
+        "/received_friend_requests" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+
+            match chat_manager.get_received_friend_requests(user_id.unwrap()).await {
+                Ok(requests) => {
+                    if requests.is_empty() {
+                        send_success(writer, "No pending friend requests").await?;
+                    } else {
+                        let mut response = String::from("Received friend requests:\n");
+                        for (sender, message, date) in requests {
+                            response.push_str(&format!("  From: {} ({})\n", sender.username, date.format("%Y-%m-%d %H:%M")));
+                            if !message.is_empty() {
+                                response.push_str(&format!("  Message: \"{}\"\n", message));
+                            }
+                            response.push_str(&format!("  Use: /accept_friend_request {} or /reject_friend_request {}\n\n", sender.username, sender.username));
+                        }
+                        send_success(writer, &response.trim()).await?;
+                    }
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to get friend requests: {}", e)).await?;
+                }
+            }
+        }
+        "/sent_friend_requests" => {
+            if user_id.is_none() {
+                send_error(writer, "Please register first").await?;
+                return Ok(());
+            }
+
+            match chat_manager.get_sent_friend_requests(user_id.unwrap()).await {
+                Ok(requests) => {
+                    if requests.is_empty() {
+                        send_success(writer, "No pending sent friend requests").await?;
+                    } else {
+                        let mut response = String::from("Sent friend requests (pending):\n");
+                        for (receiver, message, date) in requests {
+                            response.push_str(&format!("  To: {} ({})\n", receiver.username, date.format("%Y-%m-%d %H:%M")));
+                            if !message.is_empty() {
+                                response.push_str(&format!("  Message: \"{}\"\n", message));
+                            }
+                            response.push_str("  Status: ⏳ Pending\n\n");
+                        }
+                        send_success(writer, &response.trim()).await?;
+                    }
+                }
+                Err(e) => {
+                    send_error(writer, &format!("Failed to get sent requests: {}", e)).await?;
                 }
             }
         }

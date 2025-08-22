@@ -39,6 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_manager = Arc::new(DatabaseManager::new(&config.database_url).await?);
     info!("Database initialized successfully");
     
+    // Esegui le migrazioni per il sistema di amicizie
+    if let Err(e) = db_manager.run_friendship_migrations().await {
+        error!("Failed to run friendship migrations: {}", e);
+    } else {
+        info!("Friendship system migrations completed");
+    }
+    
     // Reset all users to offline status at server startup
     if let Err(e) = db_manager.reset_all_users_offline().await {
         error!("Failed to reset users offline status: {}", e);

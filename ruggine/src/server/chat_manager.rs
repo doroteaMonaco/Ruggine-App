@@ -1135,4 +1135,97 @@ impl ChatManager {
             Err(e) => Err(format!("Failed to check group membership: {}", e)),
         }
     }
+
+    // ======================= FRIENDSHIP SYSTEM =======================
+
+    /// Send a friend request to another user
+    pub async fn send_friend_request(&self, sender_id: Uuid, target_username: &str, message: Option<String>) -> Result<(), String> {
+        // Get target user by username
+        let target_user = match self.db_manager.get_user_by_username(target_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(format!("User '{}' not found", target_username)),
+            Err(e) => return Err(format!("Failed to find user: {}", e)),
+        };
+
+        // Prevent sending request to yourself
+        if sender_id == target_user.id {
+            return Err("You cannot send a friend request to yourself".to_string());
+        }
+
+        match self.db_manager.send_friend_request(sender_id, target_user.id, message).await {
+            Ok(_) => {
+                info!("Friend request sent from {} to {}", sender_id, target_user.id);
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to send friend request: {}", e)),
+        }
+    }
+
+    /// Accept a friend request
+    pub async fn accept_friend_request(&self, receiver_id: Uuid, sender_username: &str) -> Result<(), String> {
+        // Get sender user by username
+        let sender_user = match self.db_manager.get_user_by_username(sender_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(format!("User '{}' not found", sender_username)),
+            Err(e) => return Err(format!("Failed to find user: {}", e)),
+        };
+
+        match self.db_manager.accept_friend_request(sender_user.id, receiver_id).await {
+            Ok(_) => {
+                info!("Friend request accepted: {} and {} are now friends", sender_user.id, receiver_id);
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to accept friend request: {}", e)),
+        }
+    }
+
+    /// Reject a friend request
+    pub async fn reject_friend_request(&self, receiver_id: Uuid, sender_username: &str) -> Result<(), String> {
+        // Get sender user by username
+        let sender_user = match self.db_manager.get_user_by_username(sender_username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(format!("User '{}' not found", sender_username)),
+            Err(e) => return Err(format!("Failed to find user: {}", e)),
+        };
+
+        match self.db_manager.reject_friend_request(sender_user.id, receiver_id).await {
+            Ok(_) => {
+                info!("Friend request rejected: {} -> {}", sender_user.id, receiver_id);
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to reject friend request: {}", e)),
+        }
+    }
+
+    /// Get list of user's friends
+    pub async fn get_user_friends(&self, user_id: Uuid) -> Result<Vec<User>, String> {
+        match self.db_manager.get_user_friends(user_id).await {
+            Ok(friends) => Ok(friends),
+            Err(e) => Err(format!("Failed to get friends list: {}", e)),
+        }
+    }
+
+    /// Get received friend requests
+    pub async fn get_received_friend_requests(&self, user_id: Uuid) -> Result<Vec<(User, String, chrono::DateTime<chrono::Utc>)>, String> {
+        match self.db_manager.get_received_friend_requests(user_id).await {
+            Ok(requests) => Ok(requests),
+            Err(e) => Err(format!("Failed to get received friend requests: {}", e)),
+        }
+    }
+
+    /// Get sent friend requests
+    pub async fn get_sent_friend_requests(&self, user_id: Uuid) -> Result<Vec<(User, String, chrono::DateTime<chrono::Utc>)>, String> {
+        match self.db_manager.get_sent_friend_requests(user_id).await {
+            Ok(requests) => Ok(requests),
+            Err(e) => Err(format!("Failed to get sent friend requests: {}", e)),
+        }
+    }
+
+    /// Check if two users are friends
+    pub async fn are_friends(&self, user1_id: Uuid, user2_id: Uuid) -> Result<bool, String> {
+        match self.db_manager.are_friends(user1_id, user2_id).await {
+            Ok(are_friends) => Ok(are_friends),
+            Err(e) => Err(format!("Failed to check friendship: {}", e)),
+        }
+    }
 }

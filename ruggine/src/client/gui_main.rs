@@ -1,6 +1,8 @@
 use iced::{
-    widget::{button, column, container, row, text, text_input, radio, scrollable},
+    widget::{button, container, row, text, text_input, radio, scrollable, column},
     Application, Command, Element, Length, Settings, Theme, Font,
+    Alignment,
+    alignment::Horizontal,
 };
 use log::error;
 use std::sync::Arc;
@@ -8,6 +10,7 @@ use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufWriter, BufReader};
 use sqlx::{sqlite::SqlitePool, Row};
+use chrono::Local;
 
 use ruggine::client::config::ClientConfig;
 
@@ -302,9 +305,29 @@ pub enum Message {
     ConfirmDeleteGroupMessages(String), // group_id
     CancelDelete,
     
+    // Sistema di amicizie
+    ToggleFriendsSection,
+    SearchUserChanged(String),
+    SearchUser,
+    SendFriendRequest(String), // username
+    AcceptFriendRequest(String), // username
+    RejectFriendRequest(String), // username
+    RemoveFriend(String), // username
+    ListFriends,
+    ListFriendRequests,
+    ListSentFriendRequests, // NUOVO: Lista richieste inviate
+    ShowFriendRequests, // NUOVO: Apre la vista per gestire richieste ricevute
+    
+    // Aggiornamento liste amicizie
+    FriendsListUpdated(Vec<String>), // Lista amici
+    FriendRequestsUpdated(Vec<String>), // Lista richieste di amicizia ricevute
+    SentFriendRequestsUpdated(Vec<String>), // NUOVO: Lista richieste inviate
+    SearchResultUpdated(Vec<String>), // Risultati ricerca utenti
+    
     // Sistema di alert
     ShowAlert(String, AlertType),
     HideAlert,
+    BackToMain, // NUOVO: Torna alla vista principale
     
     // Inizializzazione database scalabile
     InitializeDeletedChatsDatabase,
@@ -336,6 +359,7 @@ pub enum AppState {
     Chat,          // Vista chat generale
     PrivateChat(String), // Chat privata con un utente specifico
     GroupChat(String, String), // Chat di gruppo (group_id, group_name)
+    FriendRequests, // Vista per gestire richieste di amicizia ricevute
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +409,7 @@ pub struct ChatApp {
     groups_expanded: bool,
     invites_expanded: bool,
     users_expanded: bool, // AGGIUNTO: Per rendere Users ricompattabile
+    friends_expanded: bool, // NUOVO: Sezione amicizie
     
     // Stati delle sottosezioni
     groups_list_view: bool,
@@ -394,6 +419,13 @@ pub struct ChatApp {
     my_groups: Vec<(String, String)>, // (group_id, group_name)
     my_invites: Vec<(String, String)>, // (invite_id, group_name)
     available_users: Vec<String>, // Lista utenti disponibili per inviti
+    
+    // Sistema di amicizie
+    my_friends: Vec<String>, // Lista amici
+    friend_requests: Vec<String>, // Richieste di amicizia ricevute
+    sent_friend_requests: Vec<String>, // Richieste di amicizia inviate
+    search_user_input: String, // Input per ricerca utenti
+    search_results: Vec<String>, // Risultati ricerca utenti
     
     // Gestione form di invito per gruppo specifico
     invite_form_group: Option<String>, // Group ID per cui è aperto il form di invito
@@ -477,11 +509,17 @@ impl Application for ChatApp {
                 groups_expanded: false,
                 invites_expanded: false,
                 users_expanded: false, // AGGIUNTO: Inizializza Users come chiuso
+                friends_expanded: false, // NUOVO: Inizializza Friends come chiuso
                 groups_list_view: false,
                 groups_create_view: false,
                 my_groups: Vec::new(),
                 my_invites: Vec::new(),
                 available_users: Vec::new(),
+                my_friends: Vec::new(), // NUOVO: Lista amici vuota
+                friend_requests: Vec::new(), // NUOVO: Richieste amicizia vuote
+                sent_friend_requests: Vec::new(), // NUOVO: Richieste inviate vuote
+                search_user_input: String::new(), // NUOVO: Input ricerca vuoto
+                search_results: Vec::new(), // NUOVO: Risultati ricerca vuoti
                 invite_form_group: None,
                 invite_to_group_username: String::new(),
                 users_list_for_group: None,
@@ -1952,30 +1990,28 @@ impl Application for ChatApp {
             }
             
             Message::ShowInviteFormForGroup(group_id) => {
-                // Mostra direttamente la lista degli utenti invece del form (ora usa ID)
+                // Mostra direttamente la lista degli amici invece del form (limitato agli amici)
                 self.users_list_for_group = Some(group_id);
                 self.invite_form_group = None;
                 
-                // Carica la lista degli utenti (tutti gli utenti registrati, escluso l'utente corrente)
+                // Carica la lista degli amici invece di tutti gli utenti
                 if matches!(self.connection_state, ConnectionState::Registered) {
                     if let Some(connection) = &self.persistent_connection {
                         let conn = connection.clone();
                         Command::perform(
-                            Self::send_command_persistent(conn, "/all_users".to_string()),
+                            Self::send_command_persistent(conn, "/list_friends".to_string()),
                             |result| match result {
                                 Ok(response) => {
-                                    let users = Self::parse_users_response(&response);
-                                    Message::UsersListUpdated(users)
+                                    let friends = Self::parse_friends_list(&response);
+                                    Message::UsersListUpdated(friends) // Riusa lo stesso messaggio
                                 }
                                 Err(e) => Message::ServerMessage(format!("Error: {}", e))
                             }
                         )
                     } else {
-                        // Converted to alert system
                         Command::none()
                     }
                 } else {
-                    // Converted to alert system
                     Command::none()
                 }
             }
@@ -2049,6 +2085,11 @@ impl Application for ChatApp {
             
             Message::HideAlert => {
                 self.current_alert = None;
+                Command::none()
+            }
+
+            Message::BackToMain => {
+                self.app_state = AppState::MainActions;
                 Command::none()
             }
 
@@ -2126,6 +2167,201 @@ impl Application for ChatApp {
                 Command::none()
             }
             
+            // Sistema di amicizie
+            Message::ToggleFriendsSection => {
+                self.friends_expanded = !self.friends_expanded;
+                if self.friends_expanded {
+                    // Carica amici, richieste ricevute e richieste inviate quando si apre la sezione
+                    let list_friends = Command::perform(async {}, |_| Message::ListFriends);
+                    let list_requests = Command::perform(async {}, |_| Message::ListFriendRequests);
+                    let list_sent_requests = Command::perform(async {}, |_| Message::ListSentFriendRequests);
+                    return Command::batch(vec![list_friends, list_requests, list_sent_requests]);
+                }
+                Command::none()
+            }
+            
+            Message::SearchUserChanged(input) => {
+                self.search_user_input = input;
+                Command::none()
+            }
+            
+            Message::SearchUser => {
+                if !self.search_user_input.trim().is_empty() {
+                    if let Some(connection) = &self.persistent_connection {
+                        let conn = connection.clone();
+                        let query = self.search_user_input.trim().to_string();
+                        // Svuota il campo di ricerca subito dopo aver avviato la ricerca
+                        self.search_user_input.clear();
+                        // Uso un comando diverso: cerco tutti gli utenti e filtro lato client
+                        Command::perform(
+                            Self::send_command_persistent(conn, "/all_users".to_string()),
+                            move |result| match result {
+                                Ok(response) => {
+                                    let all_users = Self::parse_users_response(&response);
+                                    // Filtro lato client per il nome cercato
+                                    let filtered_users: Vec<String> = all_users
+                                        .into_iter()
+                                        .filter(|username| username.to_lowercase().contains(&query.to_lowercase()))
+                                        .collect();
+                                    Message::SearchResultUpdated(filtered_users)
+                                }
+                                Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                            }
+                        )
+                    } else {
+                        Command::none()
+                    }
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::SendFriendRequest(username) => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    // Torna alla vista principale dopo l'invio della richiesta
+                    self.app_state = AppState::MainActions;
+                    Command::perform(
+                        Self::send_command_persistent(conn, format!("/send_friend_request {}", username)),
+                        |result| match result {
+                            Ok(_) => Message::ShowAlert("Friend request sent!".to_string(), AlertType::Success),
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::AcceptFriendRequest(username) => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, format!("/accept_friend_request {}", username)),
+                        |result| match result {
+                            Ok(_) => {
+                                // Ricarica lista amici e richieste
+                                Message::ListFriends
+                            }
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::RejectFriendRequest(username) => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, format!("/reject_friend_request {}", username)),
+                        |result| match result {
+                            Ok(_) => Message::ListFriendRequests,
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::RemoveFriend(username) => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, format!("/remove_friend {}", username)),
+                        |result| match result {
+                            Ok(_) => Message::ListFriends,
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::ListFriends => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, "/list_friends".to_string()),
+                        |result| match result {
+                            Ok(response) => {
+                                let friends = Self::parse_friends_list(&response);
+                                Message::FriendsListUpdated(friends)
+                            }
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::ListFriendRequests => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, "/received_friend_requests".to_string()),
+                        |result| match result {
+                            Ok(response) => {
+                                let requests = Self::parse_friend_requests(&response);
+                                Message::FriendRequestsUpdated(requests)
+                            }
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::ListSentFriendRequests => {
+                if let Some(connection) = &self.persistent_connection {
+                    let conn = connection.clone();
+                    Command::perform(
+                        Self::send_command_persistent(conn, "/sent_friend_requests".to_string()),
+                        |result| match result {
+                            Ok(response) => {
+                                let sent_requests = Self::parse_sent_friend_requests(&response); // Parser diverso per sent
+                                Message::SentFriendRequestsUpdated(sent_requests)
+                            }
+                            Err(e) => Message::ShowAlert(format!("Error: {}", e), AlertType::Error)
+                        }
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+            
+            Message::FriendsListUpdated(friends) => {
+                self.my_friends = friends;
+                Command::none()
+            }
+            
+            Message::FriendRequestsUpdated(requests) => {
+                self.friend_requests = requests;
+                Command::none()
+            }
+            
+            Message::SentFriendRequestsUpdated(sent_requests) => {
+                self.sent_friend_requests = sent_requests;
+                Command::none()
+            }
+            
+            Message::SearchResultUpdated(results) => {
+                self.search_results = results;
+                Command::none()
+            }
+            
+            Message::ShowFriendRequests => {
+                self.app_state = AppState::FriendRequests;
+                // Aggiorna anche la lista delle richieste ricevute
+                let list_requests = Command::perform(async {}, |_| Message::ListFriendRequests);
+                list_requests
+            }
+            
             Message::None => Command::none(),
         }
     }
@@ -2137,6 +2373,7 @@ impl Application for ChatApp {
             AppState::Chat => self.view_main_actions(), // Per ora usa la stessa vista
             AppState::PrivateChat(ref username) => self.view_private_chat(username),
             AppState::GroupChat(ref group_id, ref group_name) => self.view_group_chat(group_id, group_name),
+            AppState::FriendRequests => self.view_friend_requests(),
         }
     }
 }
@@ -2275,14 +2512,15 @@ impl ChatApp {
         ].spacing(5);
         
         // Aggiungi la lista degli utenti con bottoni chat (solo se expanded e non siamo nel contesto di inviti)
-        if self.users_expanded && self.users_list_for_group.is_none() && !self.available_users.is_empty() {
+        // MODIFICATO: Mostra solo amici invece di tutti gli utenti
+        if self.users_expanded && self.users_list_for_group.is_none() && !self.my_friends.is_empty() {
             let users_list_section = column![
                 row![
                 text("🔒").font(EMOJI_FONT).size(14),
-                text(" Start Private Chat:").font(BOLD_FONT).size(14),
+                text(" Start Private Chat with Friends:").font(BOLD_FONT).size(14),
                 ],
                 column(
-                    self.available_users
+                    self.my_friends
                         .iter()
                         .map(|user| {
                             row![
@@ -2523,6 +2761,161 @@ impl ChatApp {
             users_section,
             groups_section,
             invites_section,
+            
+            // Sezione Friends (Sistema di amicizie)
+            {
+                let friends_header = row![
+                    text("👥").font(EMOJI_FONT).size(20),
+                    text(" Friends").font(BOLD_FONT).size(20),
+                ]
+                .align_items(iced::Alignment::Center);
+                
+                let friends_button_text = if self.friends_expanded { "🔽 Friends" } else { "▶️ Friends" };
+                let mut friends_section = column![
+                    friends_header,
+                    button(text(friends_button_text).font(EMOJI_FONT))
+                        .on_press(Message::ToggleFriendsSection)
+                        .width(Length::Fixed(150.0))
+                        .padding(8),
+                    // Pulsante per aprire Friend Requests
+                    button(text("📨 Friend Requests").font(EMOJI_FONT))
+                        .on_press(Message::ShowFriendRequests)
+                        .width(Length::Fixed(200.0))
+                        .padding(8)
+                        .style(iced::theme::Button::Secondary),
+                ];
+
+                if self.friends_expanded {
+                    // Ricerca utenti
+                    let search_section = column![
+                        text("🔍 Search Users:").font(BOLD_FONT).size(14),
+                        row![
+                            text_input("Search username...", &self.search_user_input)
+                                .on_input(Message::SearchUserChanged)
+                                .on_submit(Message::SearchUser)
+                                .padding(5)
+                                .width(Length::Fill),
+                            button(text("🔍 Search").font(EMOJI_FONT))
+                                .on_press(Message::SearchUser)
+                                .padding(5),
+                        ].spacing(10),
+                    ].spacing(5);
+                    
+                    friends_section = friends_section.push(search_section);
+                    
+                    // Risultati ricerca
+                    if !self.search_results.is_empty() {
+                        let search_results_section = column![
+                            text("Search Results:").size(14),
+                            column(
+                                self.search_results
+                                    .iter()
+                                    .filter(|username| {
+                                        // Escludi se stesso, amici esistenti e richieste già inviate
+                                        *username != &self.username &&
+                                        !self.my_friends.contains(username) &&
+                                        !self.sent_friend_requests.contains(username) &&
+                                        !self.friend_requests.contains(username)
+                                    })
+                                    .map(|username| {
+                                        row![
+                                            text(format!("👤 {}", username)).width(Length::Fill).font(EMOJI_FONT),
+                                            button(text("➕ Add Friend").font(EMOJI_FONT))
+                                                .on_press(Message::SendFriendRequest(username.clone()))
+                                                .padding(5)
+                                                .width(Length::Fixed(100.0)),
+                                        ].spacing(10)
+                                        .align_items(iced::Alignment::Center)
+                                        .into()
+                                    })
+                                    .collect::<Vec<_>>()
+                            ).spacing(5)
+                        ].spacing(10);
+                        friends_section = friends_section.push(search_results_section);
+                    }
+                    
+                    // Lista amici
+                    if !self.my_friends.is_empty() {
+                        let friends_list_section = column![
+                            text("My Friends:").size(14),
+                            column(
+                                self.my_friends
+                                    .iter()
+                                    .map(|friend| {
+                                        row![
+                                            text(format!("👥 {}", friend)).width(Length::Fill).font(EMOJI_FONT),
+                                            button(text("💬 Chat").font(EMOJI_FONT))
+                                                .on_press(Message::StartPrivateChat(friend.clone()))
+                                                .padding(5)
+                                                .width(Length::Fixed(80.0)),
+                                            button(text("❌ Remove").font(EMOJI_FONT))
+                                                .on_press(Message::RemoveFriend(friend.clone()))
+                                                .padding(5)
+                                                .width(Length::Fixed(80.0))
+                                                .style(iced::theme::Button::Destructive),
+                                        ].spacing(10)
+                                        .align_items(iced::Alignment::Center)
+                                        .into()
+                                    })
+                                    .collect::<Vec<_>>()
+                            ).spacing(5)
+                        ].spacing(10);
+                        friends_section = friends_section.push(friends_list_section);
+                    }
+                    
+                    // Richieste di amicizia ricevute
+                    if !self.friend_requests.is_empty() {
+                        let requests_section = column![
+                            text("Friend Requests:").size(14),
+                            column(
+                                self.friend_requests
+                                    .iter()
+                                    .map(|requester| {
+                                        row![
+                                            text(format!("📩 From: {}", requester)).width(Length::Fill).font(EMOJI_FONT),
+                                            button(text("✅ Accept").font(EMOJI_FONT))
+                                                .on_press(Message::AcceptFriendRequest(requester.clone()))
+                                                .padding(5)
+                                                .width(Length::Fixed(80.0)),
+                                            button(text("❌ Reject").font(EMOJI_FONT))
+                                                .on_press(Message::RejectFriendRequest(requester.clone()))
+                                                .padding(5)
+                                                .width(Length::Fixed(80.0))
+                                                .style(iced::theme::Button::Destructive),
+                                        ].spacing(10)
+                                        .align_items(iced::Alignment::Center)
+                                        .into()
+                                    })
+                                    .collect::<Vec<_>>()
+                            ).spacing(5)
+                        ].spacing(10);
+                        friends_section = friends_section.push(requests_section);
+                    }
+                    
+                    // Richieste di amicizia inviate
+                    if !self.sent_friend_requests.is_empty() {
+                        let sent_requests_section = column![
+                            text("Sent Friend Requests:").size(14),
+                            column(
+                                self.sent_friend_requests
+                                    .iter()
+                                    .map(|recipient| {
+                                        row![
+                                            text(format!("📤 To: {}", recipient)).width(Length::Fill).font(EMOJI_FONT),
+                                            text("⏳ Pending").style(iced::Color::from_rgb(0.7, 0.7, 0.0)),
+                                        ].spacing(10)
+                                        .align_items(iced::Alignment::Center)
+                                        .into()
+                                    })
+                                    .collect::<Vec<_>>()
+                            ).spacing(5)
+                        ].spacing(10);
+                        friends_section = friends_section.push(sent_requests_section);
+                    }
+                }
+                
+                friends_section
+            },
         ]
         .spacing(15)
         .padding(20);
@@ -2682,7 +3075,10 @@ impl ChatApp {
            first_line.contains("Online users:") ||
            first_line.contains("All users:") ||
            first_line.contains("Private messages:") ||
-           first_line.contains("Messages from group") {
+           first_line.contains("Messages from group") ||
+           first_line.contains("Received friend requests:") ||
+           first_line.contains("Sent friend requests:") ||
+           first_line.contains("Your friends:") {
             
             println!("Multi-line response detected, reading additional lines...");
             
@@ -3260,12 +3656,31 @@ impl ChatApp {
                 .map(|(i, (msg, is_sent_by_me))| {
                     println!("✅ Rendering UI message {}: '{}', is_sent_by_me: {}", i, msg, is_sent_by_me);
                     
+                    // Simulazione orario (in produzione dovrebbe venire dal database)
+                    let current_time = Local::now().format("%H:%M").to_string();
+                    
+                    // Verifica se è un'immagine o file
+                    let is_image = msg.starts_with("[image]");
+                    let is_file = msg.starts_with("[file]");
+                    let display_msg = if is_image {
+                        "🖼️ Immagine inviata"
+                    } else if is_file {
+                        "📎 File inviato"
+                    } else {
+                        msg
+                    };
+                    
                     if *is_sent_by_me {
-                        // Messaggio inviato da te - allineato a destra con colore verde
+                        // Messaggio inviato da te - allineato a destra con colore verde e orario
                         container(
-                            text(msg)
-                                .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde
-                                .size(14)
+                            column![
+                                text(display_msg)
+                                    .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde
+                                    .size(14),
+                                text(format!("{}", current_time))
+                                    .style(Color::from_rgb(0.5, 0.5, 0.5)) // Grigio per l'orario
+                                    .size(10)
+                            ].spacing(2)
                         )
                         .padding(8)
                         .width(Length::Fill)
@@ -3273,11 +3688,16 @@ impl ChatApp {
                         .align_x(iced::alignment::Horizontal::Right)
                         .into()
                     } else {
-                        // Messaggio ricevuto - allineato a sinistra con colore blu
+                        // Messaggio ricevuto - allineato a sinistra con colore blu e orario
                         container(
-                            text(msg)
-                                .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu
-                                .size(14)
+                            column![
+                                text(display_msg)
+                                    .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu
+                                    .size(14),
+                                text(format!("{}", current_time))
+                                    .style(Color::from_rgb(0.5, 0.5, 0.5)) // Grigio per l'orario
+                                    .size(10)
+                            ].spacing(2)
                         )
                         .padding(8)
                         .width(Length::Fill)
@@ -3301,7 +3721,7 @@ impl ChatApp {
                 .on_submit(Message::SendPrivateMessage)
                 .padding(5)
                 .width(Length::Fill),
-            button(text("📤 Send").font(EMOJI_FONT))
+            button(text("�📤 Send").font(EMOJI_FONT))
                 .on_press(Message::SendPrivateMessage)
                 .padding(5),
         ].spacing(10).align_items(Alignment::Center);
@@ -3351,12 +3771,31 @@ impl ChatApp {
                 .map(|(i, (msg, is_sent_by_me, sender_username))| {
                     println!("✅ Rendering UI group message {}: '{}', is_sent_by_me: {}, sender: {:?}", i, msg, is_sent_by_me, sender_username);
                     
+                    // Simulazione orario (in produzione dovrebbe venire dal database)
+                    let current_time = Local::now().format("%H:%M").to_string();
+                    
+                    // Verifica se è un'immagine o file
+                    let is_image = msg.starts_with("[image]");
+                    let is_file = msg.starts_with("[file]");
+                    let display_msg = if is_image {
+                        "🖼️ Immagine inviata"
+                    } else if is_file {
+                        "📎 File inviato"
+                    } else {
+                        msg
+                    };
+                    
                     if *is_sent_by_me {
                         // Messaggio inviato da te - allineato a destra con colore verde, senza username
                         container(
-                            text(msg)
-                                .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde per i tuoi messaggi
-                                .size(14)
+                            column![
+                                text(display_msg)
+                                    .style(Color::from_rgb(0.0, 0.7, 0.0)) // Verde per i tuoi messaggi
+                                    .size(14),
+                                text(format!("{}", current_time))
+                                    .style(Color::from_rgb(0.5, 0.5, 0.5)) // Grigio per l'orario
+                                    .size(10)
+                            ].spacing(2)
                         )
                         .padding(8)
                         .width(Length::Fill)
@@ -3373,9 +3812,12 @@ impl ChatApp {
                                 text(format!("{}", sender_display))
                                     .style(Color::from_rgb(0.4, 0.4, 0.4)) // Grigio per il nome utente
                                     .size(12),
-                                text(msg)
+                                text(display_msg)
                                     .style(Color::from_rgb(0.0, 0.5, 1.0)) // Blu per il messaggio
-                                    .size(14)
+                                    .size(14),
+                                text(format!("⏰ {}", current_time))
+                                    .style(Color::from_rgb(0.5, 0.5, 0.5)) // Grigio per l'orario
+                                    .size(10)
                             ].spacing(2)
                         )
                         .padding(8)
@@ -3403,7 +3845,16 @@ impl ChatApp {
                 .on_submit(Message::SendGroupMessage)
                 .padding(5)
                 .width(Length::Fill),
-            button(text("📤 Send").font(EMOJI_FONT))
+            button(text("�").font(EMOJI_FONT))
+                .on_press(Message::GroupChatInputChanged(format!("{} 😀", self.group_chat_input)))
+                .padding(5),
+            button(text("📎").font(EMOJI_FONT))
+                .on_press(Message::GroupChatInputChanged(format!("[file] {}", self.group_chat_input)))
+                .padding(5),
+            button(text("🖼️").font(EMOJI_FONT))
+                .on_press(Message::GroupChatInputChanged(format!("[image] {}", self.group_chat_input)))
+                .padding(5),
+            button(text("�📤 Send").font(EMOJI_FONT))
                 .on_press(Message::SendGroupMessage)
                 .padding(5),
         ].spacing(10).align_items(Alignment::Center);
@@ -3673,6 +4124,179 @@ impl ChatApp {
                 "CONTINUE_LISTENING".to_string()
             }
         }
+    }
+    
+    // Metodi helper per il sistema di amicizie
+    fn parse_friends_list(response: &str) -> Vec<String> {
+        if response.starts_with("OK:") && (response.contains("Your friends:") || response.contains("Friends:")) {
+            let lines: Vec<&str> = response.lines().collect();
+            lines.iter()
+                .skip(1) // Salta la prima riga "OK: Your friends:"
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && trimmed.contains(" - ") {
+                        // Estrae il nome prima di " - " (per formato "username - 🟢 Online")
+                        if let Some(dash_index) = trimmed.find(" - ") {
+                            Some(trimmed[..dash_index].trim().to_string())
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    fn parse_friend_requests(response: &str) -> Vec<String> {
+        if response.starts_with("OK:") && (response.contains("friend requests:") || response.contains("Friend requests:")) {
+            // Estrai solo i nomi degli utenti dalle righe "From: username"
+            let lines: Vec<&str> = response.lines().collect();
+            lines.iter()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("From: ") {
+                        // Estrae il nome utente dalla riga "From: username (date)"
+                        if let Some(name_part) = trimmed.strip_prefix("From: ") {
+                            if let Some(space_index) = name_part.find(' ') {
+                                Some(name_part[..space_index].to_string())
+                            } else {
+                                Some(name_part.to_string())
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    fn parse_sent_friend_requests(response: &str) -> Vec<String> {
+        if response.starts_with("OK:") && response.contains("Sent friend requests") {
+            // Estrai solo i nomi degli utenti dalle righe "To: username"
+            let lines: Vec<&str> = response.lines().collect();
+            lines.iter()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("To: ") {
+                        // Estrae il nome utente dalla riga "To: username (date)"
+                        if let Some(name_part) = trimmed.strip_prefix("To: ") {
+                            if let Some(space_index) = name_part.find(' ') {
+                                Some(name_part[..space_index].to_string())
+                            } else {
+                                Some(name_part.to_string())
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    fn parse_search_results(response: &str) -> Vec<String> {
+        if response.starts_with("OK:") && response.contains("Search results:") {
+            let lines: Vec<&str> = response.lines().collect();
+            if lines.len() > 1 {
+                lines[1..].iter()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn view_friend_requests(&self) -> Element<Message> {
+        let title = text("Friend Requests")
+            .size(24)
+            .width(Length::Fill)
+            .horizontal_alignment(Horizontal::Center);
+
+        let mut content = column![title].padding(20).spacing(10);
+
+        // Pulsante per tornare indietro
+        let back_button = button(text("← Back to Main"))
+            .on_press(Message::BackToMain)
+            .padding([10, 15])
+            .style(iced::theme::Button::Primary);
+
+        content = content.push(back_button);
+
+        // Sezione richieste ricevute
+        if !self.friend_requests.is_empty() {
+            let requests_title = text("Received Friend Requests")
+                .size(18);
+
+            content = content.push(requests_title);
+
+            for request in &self.friend_requests {
+                let request_row = row![
+                    text(request.clone()).width(Length::FillPortion(3)),
+                    button(text("Accept"))
+                        .on_press(Message::AcceptFriendRequest(request.clone()))
+                        .padding([5, 10])
+                        .style(iced::theme::Button::Positive),
+                    button(text("Reject"))
+                        .on_press(Message::RejectFriendRequest(request.clone()))
+                        .padding([5, 10])
+                        .style(iced::theme::Button::Destructive)
+                ]
+                .spacing(10)
+                .align_items(Alignment::Center)
+                .padding(10);
+
+                content = content.push(
+                    container(request_row)
+                        .width(Length::Fill)
+                        .padding(5)
+                        .style(iced::theme::Container::Box)
+                );
+            }
+        } else {
+            content = content.push(
+                text("No pending friend requests")
+                    .size(16)
+                    .horizontal_alignment(Horizontal::Center)
+            );
+        }
+
+        // Aggiungi notifiche se presenti
+        let mut final_content = column![content];
+        
+        if let Some(ref current_alert) = self.current_alert {
+            let alert_text = text(&current_alert.message)
+                .size(14)
+                .horizontal_alignment(Horizontal::Center);
+                
+            final_content = final_content.push(
+                container(alert_text)
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(iced::theme::Container::Box)
+            );
+        }
+
+        container(final_content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }
 

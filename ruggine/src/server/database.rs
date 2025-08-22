@@ -767,4 +767,334 @@ impl DatabaseManager {
         Ok(count)
     }
 
+    // ======================= FRIENDSHIP SYSTEM =======================
+
+    /// Invia una richiesta di amicizia
+    pub async fn send_friend_request(&self, sender_id: Uuid, receiver_id: Uuid, message: Option<String>) -> Result<()> {
+        // Verifica che non siano già amici
+        if self.are_friends(sender_id, receiver_id).await? {
+            return Err(anyhow::anyhow!("Users are already friends"));
+        }
+
+        // Verifica che non ci sia già una richiesta pendente
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM friend_requests WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"
+        )
+        .bind(sender_id.to_string())
+        .bind(receiver_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        if existing > 0 {
+            return Err(anyhow::anyhow!("Friend request already pending"));
+        }
+
+        sqlx::query(
+            "INSERT INTO friend_requests (sender_id, receiver_id, message, status) VALUES (?, ?, ?, 'pending')"
+        )
+        .bind(sender_id.to_string())
+        .bind(receiver_id.to_string())
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+
+        info!("Friend request sent from {} to {}", sender_id, receiver_id);
+        Ok(())
+    }
+
+    /// Accetta una richiesta di amicizia
+    pub async fn accept_friend_request(&self, sender_id: Uuid, receiver_id: Uuid) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        // Aggiorna lo status della richiesta
+        let result = sqlx::query(
+            "UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP 
+             WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"
+        )
+        .bind(sender_id.to_string())
+        .bind(receiver_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("No pending friend request found"));
+        }
+
+        // Crea l'amicizia (ordine canonico: user1 < user2)
+        let (user1, user2) = if sender_id < receiver_id {
+            (sender_id, receiver_id)
+        } else {
+            (receiver_id, sender_id)
+        };
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO friendships (user1_id, user2_id) VALUES (?, ?)"
+        )
+        .bind(user1.to_string())
+        .bind(user2.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        info!("Friend request accepted: {} and {} are now friends", sender_id, receiver_id);
+        Ok(())
+    }
+
+    /// Rifiuta una richiesta di amicizia
+    pub async fn reject_friend_request(&self, sender_id: Uuid, receiver_id: Uuid) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE friend_requests SET status = 'rejected', updated_at = CURRENT_TIMESTAMP 
+             WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"
+        )
+        .bind(sender_id.to_string())
+        .bind(receiver_id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("No pending friend request found"));
+        }
+
+        info!("Friend request rejected: {} -> {}", sender_id, receiver_id);
+        Ok(())
+    }
+
+    /// Verifica se due utenti sono amici
+    pub async fn are_friends(&self, user1_id: Uuid, user2_id: Uuid) -> Result<bool> {
+        let (u1, u2) = if user1_id < user2_id {
+            (user1_id, user2_id)
+        } else {
+            (user2_id, user1_id)
+        };
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM friendships WHERE user1_id = ? AND user2_id = ?"
+        )
+        .bind(u1.to_string())
+        .bind(u2.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count > 0)
+    }
+
+    /// Ottieni tutti gli amici di un utente
+    pub async fn get_user_friends(&self, user_id: Uuid) -> Result<Vec<User>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT u.id, u.username, u.created_at, u.is_online
+            FROM users u
+            JOIN user_friendships uf ON u.id = uf.friend_id
+            WHERE uf.user_id = ?
+            ORDER BY u.username
+            "#
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut friends = Vec::new();
+        for row in rows {
+            let friend = User {
+                id: Uuid::parse_str(&row.get::<String, _>("id"))?,
+                username: row.get("username"),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
+                is_online: row.get("is_online"),
+            };
+            friends.push(friend);
+        }
+
+        Ok(friends)
+    }
+
+    /// Ottieni le richieste di amicizia ricevute da un utente
+    pub async fn get_received_friend_requests(&self, user_id: Uuid) -> Result<Vec<(User, String, DateTime<Utc>)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT u.id, u.username, u.created_at, u.is_online, 
+                   fr.message, fr.created_at as request_created_at
+            FROM friend_requests fr
+            JOIN users u ON fr.sender_id = u.id
+            WHERE fr.receiver_id = ? AND fr.status = 'pending'
+            ORDER BY fr.created_at ASC
+            "#
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut requests = Vec::new();
+        
+        for row in rows {
+            let sender = User {
+                id: Uuid::parse_str(&row.get::<String, _>("id"))?,
+                username: row.get("username"),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
+                is_online: row.get("is_online"),
+            };
+            let message = row.get::<Option<String>, _>("message").unwrap_or_default();
+            
+            // Gestisci il timestamp SQLite in modo più robusto
+            let request_timestamp = row.get::<String, _>("request_created_at");
+            let request_date = if let Ok(dt) = DateTime::parse_from_rfc3339(&request_timestamp) {
+                dt.with_timezone(&Utc)
+            } else {
+                // Fallback: usa il timestamp corrente se il parsing fallisce
+                Utc::now()
+            };
+            
+            requests.push((sender, message, request_date));
+        }
+
+        Ok(requests)
+    }
+
+    /// Ottieni le richieste di amicizia inviate da un utente
+    pub async fn get_sent_friend_requests(&self, user_id: Uuid) -> Result<Vec<(User, String, DateTime<Utc>)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT u.id, u.username, u.created_at, u.is_online, 
+                   fr.message, fr.created_at as request_created_at
+            FROM friend_requests fr
+            JOIN users u ON fr.receiver_id = u.id
+            WHERE fr.sender_id = ? AND fr.status = 'pending'
+            ORDER BY fr.created_at ASC
+            "#
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut requests = Vec::new();
+        for row in rows {
+            let receiver = User {
+                id: Uuid::parse_str(&row.get::<String, _>("id"))?,
+                username: row.get("username"),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?.with_timezone(&Utc),
+                is_online: row.get("is_online"),
+            };
+            let message = row.get::<Option<String>, _>("message").unwrap_or_default();
+            
+            // Gestisci il timestamp SQLite in modo più robusto
+            let request_timestamp = row.get::<String, _>("request_created_at");
+            let request_date = if let Ok(dt) = DateTime::parse_from_rfc3339(&request_timestamp) {
+                dt.with_timezone(&Utc)
+            } else {
+                // Fallback: usa il timestamp corrente se il parsing fallisce
+                Utc::now()
+            };
+            
+            requests.push((receiver, message, request_date));
+        }
+
+        Ok(requests)
+    }
+
+    /// Rimuovi un'amicizia
+    pub async fn remove_friendship(&self, user1_id: Uuid, user2_id: Uuid) -> Result<()> {
+        let (u1, u2) = if user1_id < user2_id {
+            (user1_id, user2_id)
+        } else {
+            (user2_id, user1_id)
+        };
+
+        sqlx::query(
+            "DELETE FROM friendships WHERE user1_id = ? AND user2_id = ?"
+        )
+        .bind(u1.to_string())
+        .bind(u2.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        info!("Friendship removed between {} and {}", user1_id, user2_id);
+        Ok(())
+    }
+
+    /// Esegue le migrazioni del database per il sistema di amicizie
+    pub async fn run_friendship_migrations(&self) -> Result<()> {
+        // Prima rimuovi le tabelle esistenti se hanno foreign key errate
+        sqlx::query("DROP TABLE IF EXISTS friend_requests").execute(&self.pool).await?;
+        sqlx::query("DROP TABLE IF EXISTS friendships").execute(&self.pool).await?;
+        sqlx::query("DROP VIEW IF EXISTS user_friendships").execute(&self.pool).await?;
+        
+        // Crea le tabelle direttamente invece di usare include_str
+        
+        // Tabella per le richieste di amicizia
+        sqlx::query(r#"
+            CREATE TABLE IF NOT EXISTS friend_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id TEXT NOT NULL,
+                receiver_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(sender_id, receiver_id),
+                CHECK (sender_id != receiver_id),
+                CHECK (status IN ('pending', 'accepted', 'rejected'))
+            )
+        "#).execute(&self.pool).await?;
+
+        // Tabella per le amicizie confermate
+        sqlx::query(r#"
+            CREATE TABLE IF NOT EXISTS friendships (
+                user1_id TEXT NOT NULL,
+                user2_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                PRIMARY KEY (user1_id, user2_id),
+                FOREIGN KEY (user1_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (user2_id) REFERENCES users(id) ON DELETE CASCADE,
+                CHECK (user1_id < user2_id)
+            )
+        "#).execute(&self.pool).await?;
+
+        // Indici per performance
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_friend_requests_sender ON friend_requests(sender_id)")
+            .execute(&self.pool).await?;
+        
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_friend_requests_receiver ON friend_requests(receiver_id)")
+            .execute(&self.pool).await?;
+        
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_friend_requests_status ON friend_requests(status)")
+            .execute(&self.pool).await?;
+        
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_friendships_user1 ON friendships(user1_id)")
+            .execute(&self.pool).await?;
+        
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_friendships_user2 ON friendships(user2_id)")
+            .execute(&self.pool).await?;
+
+        // Trigger per aggiornare updated_at
+        sqlx::query(r#"
+            CREATE TRIGGER IF NOT EXISTS update_friend_requests_timestamp 
+            AFTER UPDATE ON friend_requests
+            BEGIN
+                UPDATE friend_requests SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        "#).execute(&self.pool).await?;
+
+        // View per semplificare le query di amicizia (bidirezionale)
+        sqlx::query(r#"
+            CREATE VIEW IF NOT EXISTS user_friendships AS
+            SELECT 
+                user1_id as user_id, 
+                user2_id as friend_id, 
+                created_at
+            FROM friendships
+            UNION ALL
+            SELECT 
+                user2_id as user_id, 
+                user1_id as friend_id, 
+                created_at
+            FROM friendships
+        "#).execute(&self.pool).await?;
+
+        info!("Friendship system migrations completed successfully");
+        Ok(())
+    }
+
 }

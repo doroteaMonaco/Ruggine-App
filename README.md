@@ -105,7 +105,6 @@ eliminare messaggi db troppo vecchi per efficienza
 togliere tutti i debug
 controllare comandi in connection
 elimazione per me o per tutti dei messaggi
-associare orario al messaggio
 risposta ad un messaggio specifico
 invio di immagini, file, emojy in chat
 profilo utente 
