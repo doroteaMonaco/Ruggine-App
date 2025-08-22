@@ -2,7 +2,12 @@ use crate::server::{database::Database, auth};
 use std::sync::Arc;
 use sqlx::Row;
 
-pub async fn send_group_message(db: Arc<Database>, session_token: &str, group_name: &str, message: &str) -> String {
+use crate::server::config::ServerConfig;
+
+pub async fn send_group_message(db: Arc<Database>, session_token: &str, group_name: &str, message: &str, config: &ServerConfig) -> String {
+    if message.len() > config.max_message_length {
+        return format!("ERR: Message too long (max {} chars)", config.max_message_length);
+    }
     let user_id = match auth::validate_session(db.clone(), session_token).await {
         Some(uid) => uid,
         None => return "ERR: Invalid session".to_string(),
@@ -47,7 +52,10 @@ pub async fn send_group_message(db: Arc<Database>, session_token: &str, group_na
     }
 }
 
-pub async fn send_private_message(db: Arc<Database>, session_token: &str, to_username: &str, message: &str) -> String {
+pub async fn send_private_message(db: Arc<Database>, session_token: &str, to_username: &str, message: &str, config: &ServerConfig) -> String {
+    if message.len() > config.max_message_length {
+        return format!("ERR: Message too long (max {} chars)", config.max_message_length);
+    }
     let user_id = match auth::validate_session(db.clone(), session_token).await {
         Some(uid) => uid,
         None => return "ERR: Invalid session".to_string(),

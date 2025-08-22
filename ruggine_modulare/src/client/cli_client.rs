@@ -1,9 +1,12 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, stdin};
 
+use crate::server::config::ClientConfig;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:5000".to_string());
+    let client_config = ClientConfig::from_env();
+    let addr = std::env::args().nth(1).unwrap_or_else(|| format!("{}:{}", client_config.default_host, client_config.default_port));
     println!("[CLIENT] Benvenuto! Digita i comandi (es: /register user pass, /login user pass):");
     let stream = TcpStream::connect(&addr).await?;
     let (reader, writer) = stream.into_split();
@@ -26,13 +29,60 @@ async fn main() -> anyhow::Result<()> {
         let command = parts.next().unwrap_or("");
         let args: Vec<&str> = parts.collect();
         // Comandi che NON richiedono session_token
-        let public_cmds = ["/register", "/login", "/users", "/all_users"];
+    let public_cmds = ["/register", "/login", "/users", "/all_users", "/logout", "/help", "/quit"];
+        let friend_cmds = [
+            "/send_friend_request", "/accept_friend_request", "/reject_friend_request",
+            "/list_friends", "/received_friend_requests", "/sent_friend_requests"
+        ];
         // Comandi di messaggistica che richiedono token ma hanno parsing speciale
         let msg_cmds = ["/send", "/send_private", "/private", "/get_group_messages", "/get_private_messages", "/delete_group_messages", "/delete_private_messages"];
         let mut to_send = String::new();
+        // Limite lunghezza messaggio
+        if msg_cmds.contains(&command) && args.len() >= 2 {
+            let message = &args[1..].join(" ");
+            if message.len() > 2048 {
+                println!("[CLIENT] Messaggio troppo lungo (max 2048 caratteri)");
+                continue;
+            }
+        }
         if public_cmds.contains(&command) {
-            to_send = cmd.to_string();
-        } else if msg_cmds.contains(&command) {
+            // /logout richiede il token
+            if command == "/logout" {
+                if let Some(token) = &session_token {
+                    to_send = format!("/logout {}", token);
+                } else {
+                    println!("[CLIENT] Devi prima effettuare il login!");
+                    continue;
+                }
+            } else if command == "/quit" {
+                to_send = "/quit".to_string();
+            } else {
+                to_send = cmd.to_string();
+            }
+        } else if friend_cmds.contains(&command) {
+            if let Some(token) = &session_token {
+                match command {
+                    "/send_friend_request" if args.len() >= 1 => {
+                        let to_username = args[0];
+                        let message = if args.len() > 1 { args[1..].join(" ") } else { "".to_string() };
+                        to_send = format!("/send_friend_request {} {} {}", token, to_username, message);
+                    }
+                    "/accept_friend_request" | "/reject_friend_request" if args.len() == 1 => {
+                        to_send = format!("{} {} {}", command, token, args[0]);
+                    }
+                    "/list_friends" | "/received_friend_requests" | "/sent_friend_requests" => {
+                        to_send = format!("{} {}", command, token);
+                    }
+                    _ => {
+                        println!("[CLIENT] Sintassi comando non valida.");
+                        continue;
+                    }
+                }
+            } else {
+                println!("[CLIENT] Devi prima effettuare il login!");
+                continue;
+            }
+    } else if msg_cmds.contains(&command) {
             if let Some(token) = &session_token {
                 // Ricostruisci la sintassi server
                 match command {
@@ -95,6 +145,16 @@ async fn main() -> anyhow::Result<()> {
                     println!("[CLIENT] Login effettuato! Sessione attiva.");
                 }
             }
+        }
+        // Cancella session_token dopo logout
+        if command == "/logout" && response.starts_with("OK: Logout") {
+            session_token = None;
+            println!("[CLIENT] Logout effettuato. Sessione terminata.");
+        }
+        // Chiudi app dopo /quit
+        if command == "/quit" {
+            println!("[CLIENT] Disconnessione e uscita.");
+            break;
         }
     }
     Ok(())

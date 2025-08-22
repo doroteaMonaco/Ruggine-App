@@ -1,10 +1,12 @@
 use crate::server::{database::Database, auth, users, groups, messages};
+use crate::server::config::ServerConfig;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 
 pub struct Server {
     pub db: Arc<Database>,
+    pub config: ServerConfig,
 }
 
 impl Server {
@@ -15,8 +17,9 @@ impl Server {
             let (stream, peer) = listener.accept().await?;
             println!("[SERVER] New connection from {}", peer);
             let db = self.db.clone();
+            let config = self.config.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(db, stream).await {
+                if let Err(e) = handle_client(db, config, stream).await {
                     println!("[SERVER] Client error: {}", e);
                 }
             });
@@ -26,11 +29,75 @@ impl Server {
     pub async fn handle_command(&self, cmd: &str, args: &[&str]) -> String {
         println!("[SERVER] Received command: {} {:?}", cmd, args);
         match cmd {
+            // FRIENDSHIP SYSTEM
+            "/send_friend_request" if args.len() >= 2 => {
+                let session_token = args[0];
+                let to_username = args[1];
+                let message = if args.len() > 2 { args[2..].join(" ") } else { "".to_string() };
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::send_friend_request(self.db.clone(), &uid, to_username, &message).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            "/accept_friend_request" if args.len() == 2 => {
+                let session_token = args[0];
+                let from_username = args[1];
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::accept_friend_request(self.db.clone(), &uid, from_username).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            "/reject_friend_request" if args.len() == 2 => {
+                let session_token = args[0];
+                let from_username = args[1];
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::reject_friend_request(self.db.clone(), &uid, from_username).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            "/list_friends" if args.len() == 1 => {
+                let session_token = args[0];
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::list_friends(self.db.clone(), &uid).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            "/received_friend_requests" if args.len() == 1 => {
+                let session_token = args[0];
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::received_friend_requests(self.db.clone(), &uid).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            "/sent_friend_requests" if args.len() == 1 => {
+                let session_token = args[0];
+                if let Some(uid) = auth::validate_session(self.db.clone(), session_token).await {
+                    users::sent_friend_requests(self.db.clone(), &uid).await
+                } else {
+                    "ERR: Invalid or expired session".to_string()
+                }
+            }
+            // SYSTEM
+            "/help" => {
+                users::help().await
+            }
+            "/quit" => {
+                "OK: Disconnected".to_string()
+            }
+            "/logout" if args.len() == 1 => {
+                // args[0] = session_token
+                auth::logout(self.db.clone(), args[0]).await
+            }
             "/register" if args.len() == 2 => {
-                auth::register(self.db.clone(), args[0], args[1]).await
+                auth::register(self.db.clone(), args[0], args[1], &self.config).await
             }
             "/login" if args.len() == 2 => {
-                auth::login(self.db.clone(), args[0], args[1]).await
+                auth::login(self.db.clone(), args[0], args[1], &self.config).await
             }
             "/users" => {
                 users::list_online(self.db.clone()).await
@@ -108,13 +175,13 @@ impl Server {
                 let session_token = args[0];
                 let group_name = args[1];
                 let message = &args[2..].join(" ");
-                messages::send_group_message(self.db.clone(), session_token, group_name, message).await
+                messages::send_group_message(self.db.clone(), session_token, group_name, message, &self.config).await
             }
             "/send_private" | "/private" if args.len() >= 3 => {
                 let session_token = args[0];
                 let to_username = args[1];
                 let message = &args[2..].join(" ");
-                messages::send_private_message(self.db.clone(), session_token, to_username, message).await
+                messages::send_private_message(self.db.clone(), session_token, to_username, message, &self.config).await
             }
             "/get_group_messages" if args.len() == 2 => {
                 let session_token = args[0];
@@ -141,7 +208,7 @@ impl Server {
     }
 }
 
-async fn handle_client(db: Arc<Database>, stream: TcpStream) -> anyhow::Result<()> {
+async fn handle_client(db: Arc<Database>, config: ServerConfig, stream: TcpStream) -> anyhow::Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
@@ -158,7 +225,7 @@ async fn handle_client(db: Arc<Database>, stream: TcpStream) -> anyhow::Result<(
         let mut parts = trimmed.split_whitespace();
         let cmd = parts.next().unwrap_or("");
         let args: Vec<&str> = parts.collect();
-        let server = Server { db: db.clone() };
+        let server = Server { db: db.clone(), config: config.clone() };
         let response = server.handle_command(cmd, &args).await;
         writer.write_all(response.as_bytes()).await?;
         writer.write_all(b"\n").await?;
