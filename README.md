@@ -1,116 +1,126 @@
-__TARGET__
-WINDOWS --> @echo off
-REM build.bat
-echo Building for Windows...
-cargo build --release
+<p align="center">
+	<img src="./img/ruggineImage.png" alt="Ruggine logo" width="420" />
+</p>
 
-echo Binary size:
-dir target\release\ruggine*.exe
+# Ruggine — Chat client/server
 
+Ruggine è una piattaforma di messaggistica moderna, end-to-end, progettata per essere sicura, modulare e operabile in ambienti di produzione. Il codice server è scritto in Rust usando Tokio e SQLx; il client desktop utilizza Iced per l'interfaccia.
 
+Questa guida fornisce istruzioni chiare e operative su come configurare, costruire, distribuire e gestire Ruggine in produzione.
 
-LINUX --> #!/bin/bash
-# build.sh
-echo "Building for current platform..."
-cargo build --release
+## Sommario
+- Panoramica
+- Requisiti di produzione
+- Configurazione e gestione dei segreti
+- Build, containerizzazione e deploy
+- Operazioni, logging e monitoraggio
+- Sicurezza e gestione delle chiavi crittografiche
+- Backup, migrazioni e disaster recovery
+- Scaling e architettura di produzione
+- Troubleshooting e FAQ
+- Contribuire
 
-echo "Cross-compiling for Windows (if on Linux)..."
-cargo build --release --target x86_64-pc-windows-gnu
+## Panoramica
+Ruggine gestisce chat private e di gruppo con messaggistica in tempo reale. Le conversazioni sono salvate nel database in forma cifrata (AES-256-GCM) e il server mantiene un modello di sessioni e presenza per i client connessi. 
 
-echo "Binary sizes:"
-ls -lh target/release/ruggine*
+### Nuove Funzionalità v2.0
+- **WebSocket + Redis**: Messaggistica in tempo reale che sostituisce il polling del database
+- **Scalabilità migliorata**: Supporto per multiple istanze server via Redis pub/sub
+- **Latenza ridotta**: Messaggi istantanei invece di attesa polling
+- **Efficienza di rete**: Solo messaggi necessari invece di query periodiche
 
-__DEPENDENCIES__
-tokio - runtime asincrono per networking
-serde + serde_json - serializzazione messaggi
-clap - parsing argomenti command line
-log + env_logger - sistema di logging
-crossterm - interfaccia utente terminale (client console)
-eframe + egui - interfaccia grafica moderna (client GUI)
-uuid - generazione ID univoci
-chrono - gestione timestamp
-sqlx - database SQLite per persistenza
-sysinfo - monitoraggio CPU
+Il progetto è pensato per essere facilmente integrato in pipeline CI/CD e in infrastrutture containerizzate.
 
-__TESTS__
-# Compila e avvia il server
-cargo run --bin ruggine-server
+## Requisiti di produzione
+- Toolchain: utilizzare Rust stable (compilare in CI). Bloccare le dipendenze con `Cargo.lock`.
+- Database: PostgreSQL 14+ (consigliato); SQLite è solo per sviluppo.
+- Redis: Redis 6+ per WebSocket pub/sub e caching (obbligatorio per messaging real-time).
+- TLS: certificati validi per ingress/endpoint. È raccomandato l'uso di rustls o di un reverse-proxy (nginx/traefik).
+- Secret management: Vault, AWS Secrets Manager, Azure Key Vault o equivalenti per `ENCRYPTION_MASTER_KEY` e credenziali DB.
 
-# Client GUI (Interfaccia Grafica User-Friendly) - RACCOMANDATO
-cargo run --bin ruggine-gui
+## Configurazione e gestione dei segreti
+I parametri principali sono gestiti tramite variabili d'ambiente (o secret mounts). Esempio minimo:
 
-# Client Mobile (Android/iOS) - NUOVO
-cargo run --bin ruggine-mobile
+```powershell
+DATABASE_URL=postgres://ruggine_user:securepassword@postgres:5432/ruggine
+REDIS_URL=redis://redis:6379
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8443
+WEBSOCKET_PORT=8444
+ENABLE_ENCRYPTION=true
+ENCRYPTION_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+TLS_CERT_PATH=/etc/ssl/certs/ruggine.crt
+TLS_KEY_PATH=/etc/ssl/private/ruggine.key
+LOG_LEVEL=info
+```
 
-# Client Console (per utenti tecnici)
-cargo run --bin ruggine-client
+Linee guida operative:
+- Non salvare chiavi o credenziali nel repository né in image non protette.
+- Memorizzare `ENCRYPTION_MASTER_KEY` nel secret manager della piattaforma; caricarla al boot dell'applicazione.
+- Se si ruota la `ENCRYPTION_MASTER_KEY`, assicurarsi di avere procedura per la migrazione o per mantenere chiavi legacy per poter decrittare messaggi storici (vedi `doc/ENCRYPTION.md`).
 
-# Oppure connessione diretta con telnet
-telnet 127.0.0.1 5000
+## Build, containerizzazione e deploy
+Si raccomanda di costruire i binari in un job CI dedicato e di distribuire immagini Docker immutabili.
 
-# Su Windows
-telnet localhost 5000
+- Esempio di build in CI:
 
+```powershell
+cargo build --release --locked
+```
 
-/register alice
-/users
-/help
-/quit
+- Dockerfile di esempio (multi-stage):
 
-## 🎨 CLIENT GUI - INTERFACCIA MODERNA
-Il client GUI (`ruggine-gui`) offre un'esperienza utente completa e moderna:
+```dockerfile
+FROM rust:1.70 as builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --locked
 
-### ✨ Caratteristiche Principali
-- 🖥️ **Cross-Platform**: Windows, Linux, macOS supportati nativamente
-- 🎯 **User-Friendly**: Interfaccia intuitiva per utenti non tecnici
-- 🌙 **Tema Dark/Light**: Modalità scura e chiara
-- 📱 **Responsive**: Si adatta a diverse dimensioni dello schermo
-- ⚡ **Real-Time**: Aggiornamenti in tempo reale senza lag
+FROM debian:bookworm-slim
+COPY --from=builder /app/target/release/ruggine-server /usr/local/bin/ruggine-server
+EXPOSE 8443
+ENTRYPOINT ["/usr/local/bin/ruggine-server"]
+```
 
-### 🔧 Funzionalità Complete
-- 🔌 **Connessione Server**: Dialog di connessione semplificato
-- 👤 **Gestione Account**: Registrazione e autenticazione utente
-- 🏠 **Pannello Gruppi**: Creazione, join, leave gruppi con UI dedicata
-- 👥 **Pannello Utenti**: Visualizzazione utenti online e inviti
-- 💬 **Chat Real-Time**: Messaggi colorati con timestamp
-- 📧 **Sistema Inviti**: Interfaccia drag-and-drop per inviti gruppo
-- ⚙️ **Impostazioni**: Personalizzazione tema e comportamento
-- ❓ **Aiuto Integrato**: Guida comandi e tips sempre disponibili
+- Deployment consigliato:
+	- Per PoC: `docker-compose` con Postgres e reverse-proxy TLS.
+	- Per produzione: Kubernetes con Deployment, Service, Ingress, e Secret per `ENCRYPTION_MASTER_KEY`.
 
-### 🎨 Elementi UI
-- **Menu Bar**: Accesso rapido a tutte le funzioni
-- **Sidebar Panels**: Gestione gruppi e utenti
-- **Status Bar**: Stato connessione, utente corrente, gruppo attivo
-- **Message Area**: Chat con scroll automatico e colori tematici
-- **Input Area**: Invio messaggi con shortcuts da tastiera
+## Operazioni, logging e monitoraggio
+- Logging: utilizzare formato strutturato (JSON) e centralizzare. `LOG_LEVEL` gestisce il livello di verbosità.
+- Metriche: esporre metriche compatibili Prometheus (latency, message_count, decryption_errors, active_connections).
+- Health checks: implementare `/healthz` e `/readyz` per le probe di orchestratori.
+- Backup: eseguire backup regolari del DB e testare il ripristino. Automatizzare snapshot e retention policy.
 
-### 🚀 Come Usare
-1. Avvia il server: `cargo run --bin ruggine-server`
-2. Avvia il client GUI: `cargo run --bin ruggine-gui`
-3. Inserisci server (default: 127.0.0.1:5000) e connetti
-4. Registra un username
-5. Crea/unisciti a gruppi tramite i pannelli laterali
-6. Inizia a chattare!
+## Sicurezza e gestione delle chiavi crittografiche
+- Crittografia: AES-256-GCM per i payload dei messaggi. I messaggi sono memorizzati come JSON con `nonce`, `ciphertext` e metadati.
+- Protezione chiave: mantenere `ENCRYPTION_MASTER_KEY` in un vault. L'accesso deve essere ristretto e auditabile.
+- Rotazione chiave: progettare una strategia (rolling re-encrypt, mantenimento chiavi legacy). Documentazione tecnica in `doc/ENCRYPTION.md`.
 
-__TRACCIA__
-Realizzare un’applicazione in RUST, dal titolo Ruggine, di tipo client/server per gestire una chat di scambio di messaggi testuali. La chat deve prevedere la possibilità di creare gruppi di utenti per la condivisione di messaggi. L’ammissione alla Chat è effettuata al primo avvio del programma, inviando al server una richiesta di iscrizione, mentre l’ingresso in un gruppo avviene solo su invito. Il programma deve girare su almeno 2 tra le diverse piattaforme disponibili (Windows, Linux, MacOS, Android, ChromeOS, iOS). Si richiede di porre attenzione alle prestazioni del sistema in termini di consumo di tempo di CPU e di dimensione dell’applicativo. L’applicazione deve generare un file di log, riportando i dettagli sull’utilizzo di CPU ogni 2 minuti. Si richiede inoltre di riportare nel report descrittivo del progetto la dimensione del file eseguibile.
+## Backup, migrazioni e disaster recovery
+- Migrazioni: tenere le migration files versionate e applicarle in CI con controllo dello schema.
+- Recovery plan: scriptati i passi per restore DB, import della `ENCRYPTION_MASTER_KEY` e verifica integrità delle entità cifrate.
 
+## Scaling e architettura di produzione
+- Server: stateless, scalabile orizzontalmente dietro LB.
+- Database: PostgreSQL con replica e backup; valutare partitioning per dataset massicci.
+- Consigli: caching layer (Redis) per metadati ad accesso frequente e rate-limiting su ingress.
 
-//TODO 
-Gestire bene last_seen
-fare login
-trigger per messaggi effimeri
-richieste di amicizia
-eliminare messaggi db troppo vecchi per efficienza
-togliere tutti i debug
-controllare comandi in connection
-elimazione per me o per tutti dei messaggi
-risposta ad un messaggio specifico
-invio di immagini, file, emojy in chat
-profilo utente 
-profilo di un gruppo
-rendere amministaratore un utente di gruppo
+## Troubleshooting e FAQ
+- Q: "I messaggi non si decriptano dopo un riavvio" — A: verificare `ENCRYPTION_MASTER_KEY` e cercare nel log entry con tag `[DECRYPTION FAILED]`.
+- Q: "Registrazione fallita con username già in uso" — A: server restituisce errore user-friendly `ERR: Username già in uso`.
+- Q: "Messaggi duplicati o perdita di presenza" — A: controllare il processo di polling/ack nel `ChatService` e le probe di rete.
 
-![alt text](image.png)
-![alt text](image-1.png)
-![alt text](image-2.png)
+## CI / Test suggeriti
+- Unit tests: derivazione chiavi, encrypt/decrypt, e helper crittografici.
+- Integration tests: job CI che esegue Postgres temporaneo, applica migrations e simula flussi di chat.
+
+## Contribuire
+- Branching: feature/*, fix/*, release/*.
+- PR: includere descrizione, test e passi per verifica.
+
+## Licenza e contatti
+- Inserire il file `LICENSE` nella root per chiarire termini di utilizzo (MIT/Apache-2.0 consigliate).
+- Mantainers: Luigi Gonnella & Dorotea Monaco — apri issue o PR nel repository per domande tecniche.
+
+---

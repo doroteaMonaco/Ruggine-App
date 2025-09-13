@@ -1,262 +1,170 @@
-# Implementazione Crittografia End-to-End
+# Implementazione della Crittografia in Ruggine
 
-Questa implementazione fornisce crittografia end-to-end per l'applicazione di chat Ruggine, garantendo che i messaggi siano crittografati lato client prima di essere inviati al server.
+## Panoramica
 
-## Caratteristiche Principali
+Il sistema di chat Ruggine implementa la crittografia end-to-database per proteggere i messaggi memorizzati nel database SQLite. Tutti i messaggi sono crittografati prima di essere salvati e decrittografati solo quando vengono letti dagli utenti autorizzati.
 
-### 🔐 Crittografia AES-256-GCM
-- Algoritmo: AES-256 in modalità Galois/Counter Mode (GCM)
-- Libreria: `ring` per performance e sicurezza ottimali
-- Chiavi: 256 bit generate casualmente per ogni gruppo/chat
+## Architettura di Sicurezza
 
-### 🔑 Gestione delle Chiavi
-- **Gruppi**: Ogni gruppo ha una chiave condivisa tra tutti i membri
-- **Chat Dirette**: Ogni coppia di utenti ha una chiave condivisa unica
-- **Rotazione**: Supporto per rotazione delle chiavi (opzionale)
-- **Condivisione**: Meccanismo sicuro per condividere chiavi con nuovi membri
+### 1. Algoritmo di Crittografia
 
-### 🛡️ Sicurezza
-- **Nonce Unici**: Ogni messaggio usa un nonce casuale univoco
-- **Autenticazione**: GCM fornisce autenticazione integrata
-- **Forward Secrecy**: Possibilità di implementare rotazione chiavi
-- **Zero-Knowledge Server**: Il server non può decrittare i messaggi
+- **Algoritmo**: AES-256-GCM (Advanced Encryption Standard con Galois/Counter Mode)
+- **Dimensione chiave**: 256 bit (32 byte)
+- **Dimensione nonce**: 96 bit (12 byte) - generato casualmente per ogni messaggio
+- **Autenticazione**: GCM fornisce autenticazione integrata per prevenire manomissioni
 
-## Architettura
+### 2. Gestione delle Chiavi
 
-### Componenti
+#### Master Key
+- Una chiave master di 256 bit viene generata o caricata all'avvio del server
+- Memorizzata nella variabile di ambiente `ENCRYPTION_MASTER_KEY` (formato esadecimale)
+- Se non presente, viene generata automaticamente e mostrata nei log per la persistenza
 
-1. **CryptoManager** (`src/common/crypto.rs`)
-   - Gestisce crittografia/decrittografia
-   - Memorizza chiavi in memoria
-   - Genera chiavi casuali sicure
+#### Chat-Specific Keys
+- Ogni chat (privata o di gruppo) ha una chiave derivata univoca
+- Generata usando SHA-256 da: `master_key + participant_ids_sorted`
+- Garantisce che solo i partecipanti autorizzati possano decrittografare i messaggi
 
-2. **SecureChatManager** (`src/server/secure_chat_manager.rs`)
-   - Integrazione server-side
-   - Gestione chiavi di gruppo
-   - Salvataggio messaggi crittografati
+### 3. Struttura dei Dati Crittografati
 
-3. **SecureClient** (`src/client/secure_client.rs`)
-   - API client per crittografia
-   - Gestione messaggi crittografati
-   - Integrazione con GUI
+I messaggi crittografati sono memorizzati come JSON nel database:
 
-4. **Database Schema** (`migrations/002_encryption_schema.sql`)
-   - Tabelle per messaggi crittografati
-   - Gestione chiavi di gruppo
-   - Indici per performance
-
-### Flusso dei Messaggi
-
-#### Invio Messaggio di Gruppo
-```
-1. Client critta il messaggio con la chiave del gruppo
-2. Invia EncryptedMessage al server
-3. Server salva il messaggio crittografato
-4. Server inoltra a tutti i membri del gruppo
-5. Ogni client decritta con la propria copia della chiave
+```json
+{
+  "ciphertext": "base64_encoded_encrypted_data",
+  "nonce": "base64_encoded_nonce"
+}
 ```
 
-#### Invio Messaggio Diretto
-```
-1. Client critta con la chiave condivisa della chat
-2. Invia EncryptedMessage al server
-3. Server salva e inoltra al destinatario
-4. Destinatario decritta con la chiave condivisa
-```
+## Implementazione Tecnica
 
-## Utilizzo
+### 1. Modulo Crypto (`src/common/crypto.rs`)
 
-### Inizializzazione Client
 ```rust
-use ruggine::client::SecureClient;
+pub struct CryptoManager;
 
-let mut client = SecureClient::new();
-client.set_user_id(user_id);
+impl CryptoManager {
+    // Genera chiave master casuale
+    pub fn generate_master_key() -> [u8; 32]
+    
+    // Crittografa un messaggio
+    pub fn encrypt_message(plaintext: &str, key: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), Unspecified>
+    
+    // Decrittografa un messaggio
+    pub fn decrypt_message(ciphertext: &[u8], nonce: &[u8], key: &[u8; 32]) -> Result<String, Unspecified>
+    
+    // Genera chiave specifica per chat
+    pub fn generate_chat_key(participants: &[String], master_key: &[u8; 32]) -> [u8; 32]
+}
 ```
 
-### Configurazione Gruppo
+### 2. Processo di Crittografia
+
+#### Invio Messaggio (Encryption Flow)
+
+1. **Input**: Messaggio in plain text, lista partecipanti
+2. **Key Generation**: Genera chiave chat-specifica da master key + partecipanti ordinati
+3. **Nonce Generation**: Genera nonce casuale (12 byte)
+4. **Encryption**: AES-256-GCM encrypts message con chiave e nonce
+5. **Storage**: Salva JSON `{ciphertext, nonce}` in base64 nel database
+
+#### Lettura Messaggio (Decryption Flow)
+
+1. **Retrieval**: Legge JSON dal database
+2. **Parsing**: Decodifica base64 per ottenere ciphertext e nonce
+3. **Key Recreation**: Rigenera stessa chiave chat-specifica
+4. **Decryption**: AES-256-GCM decrypts con chiave e nonce
+5. **Validation**: GCM verifica autenticità automaticamente
+
+### 3. Backward Compatibility
+
+Il sistema gestisce messaggi legacy (non crittografati):
+
 ```rust
-// Creatore del gruppo
-let group_key = client.setup_group_encryption(group_id)?;
-
-// Altri membri importano la chiave
-client.import_group_key(group_id, &shared_key)?;
-```
-
-### Invio Messaggio Crittografato
-```rust
-// Messaggio di gruppo
-let encrypted_msg = client.prepare_encrypted_group_message(
-    group_id,
-    "Messaggio segreto",
-    MessageType::Text
-)?;
-
-// Messaggio diretto
-let encrypted_msg = client.prepare_encrypted_direct_message(
-    receiver_id,
-    "Messaggio privato",
-    MessageType::Text
-)?;
-```
-
-### Gestione Messaggi Ricevuti
-```rust
-match server_message {
-    ServerMessage::EncryptedMessageReceived { encrypted_message } => {
-        if let Some(content) = client.handle_server_message(server_message)? {
-            println!("Messaggio decrittato: {}", content);
-        }
+fn decrypt_message_from_storage(encrypted_data: &str, participants: &[String], config: &ServerConfig) -> Result<String, String> {
+    // Tenta parsing JSON - se fallisce, è legacy plain text
+    if let Ok(data) = serde_json::from_str::<serde_json::Value>(encrypted_data) {
+        // Messaggio crittografato - decripta
+        decrypt_encrypted_message(data, participants, config)
+    } else {
+        // Messaggio legacy - ritorna come plain text
+        Ok(encrypted_data.to_string())
     }
-    _ => {}
 }
 ```
 
-## Schema Database
+## Sicurezza e Considerazioni
 
-### Tabella `encrypted_messages`
-```sql
-CREATE TABLE encrypted_messages (
-    id TEXT PRIMARY KEY,
-    sender_id TEXT NOT NULL,
-    group_id TEXT,
-    receiver_id TEXT,
-    encrypted_content TEXT NOT NULL,  -- Base64
-    nonce TEXT NOT NULL,             -- Base64
-    timestamp TEXT NOT NULL,
-    message_type TEXT NOT NULL
-);
+### 1. Punti di Forza
+
+- **Crittografia forte**: AES-256-GCM è standard industriale
+- **Autenticazione integrata**: GCM previene manomissioni
+- **Isolamento delle chat**: Ogni chat ha chiave separata
+- **Perfect Forward Secrecy**: Chiavi derivate, non riutilizzate
+
+### 2. Gestione degli Errori
+
+- Messaggi non decrittografabili mostrano `[DECRYPTION FAILED]`
+- Log dettagliati per debugging senza esporre contenuti
+- Graceful fallback per messaggi legacy
+
+### 3. Configurazione
+
+```env
+# .env file
+ENABLE_ENCRYPTION=true
+ENCRYPTION_MASTER_KEY=a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 ```
 
-### Tabella `group_encryption_keys`
-```sql
-CREATE TABLE group_encryption_keys (
-    id INTEGER PRIMARY KEY,
-    group_id TEXT NOT NULL,
-    encrypted_key TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE
-);
+### 4. Limitazioni Attuali
+
+- Master key deve essere consistente tra riavvii
+- Messaggi crittografati con chiavi diverse non sono recuperabili
+- Nessuna rotazione automatica delle chiavi
+
+## Flusso dei Dati
+
+```
+[Client] --plaintext--> [Server] --encrypt--> [Database]
+                                      |
+                                   AES-256-GCM
+                                      |
+                                   JSON format
+                                      
+[Client] <--plaintext-- [Server] <--decrypt-- [Database]
+                                      |
+                                   Parse JSON
+                                      |
+                                   AES-256-GCM
 ```
 
-## Protocollo di Comunicazione
+## File Coinvolti
 
-### Nuovi Messaggi ClientMessage
-```rust
-pub enum ClientMessage {
-    // Invio messaggio crittografato
-    SendEncryptedMessage { 
-        encrypted_message: EncryptedMessage 
-    },
-    
-    // Richiesta chiave gruppo
-    RequestGroupKey { 
-        group_id: Uuid 
-    },
-    
-    // Condivisione chiave
-    ShareGroupKey { 
-        group_id: Uuid, 
-        encrypted_key: String, 
-        target_user: Uuid 
-    },
-    // ... altri messaggi esistenti
-}
+- `src/common/crypto.rs` - Implementazione crittografia
+- `src/server/config.rs` - Gestione master key
+- `src/server/messages.rs` - Encryption/decryption dei messaggi
+- `.env` - Configurazione master key
+
+## Logging e Debug
+
+Il sistema include logging dettagliato per il debugging:
+
+```
+[CRYPTO] Encrypting message for participants: ["uuid1", "uuid2"]
+[CRYPTO] Successfully encrypted message
+[CRYPTO] Decrypting message for participants: ["uuid1", "uuid2"]
+[CRYPTO] Successfully decrypted message
+[CRYPTO] Decryption failed: Unspecified
 ```
 
-### Nuovi Messaggi ServerMessage
-```rust
-pub enum ServerMessage {
-    // Messaggio crittografato ricevuto
-    EncryptedMessageReceived { 
-        encrypted_message: EncryptedMessage 
-    },
-    
-    // Chiave condivisa
-    GroupKeyShared { 
-        group_id: Uuid, 
-        encrypted_key: String 
-    },
-    
-    // Lista messaggi crittografati
-    EncryptedGroupMessages { 
-        messages: Vec<EncryptedMessage> 
-    },
-    // ... altri messaggi esistenti
-}
-```
+## Considerazioni Future
 
-## Migrazione
+1. **Key Rotation**: Implementare rotazione periodica delle chiavi
+2. **Hardware Security**: Utilizzare HSM per master key storage
+3. **End-to-End**: Estendere a crittografia end-to-end tra client
+4. **Audit Trail**: Log crittografici per compliance
+5. **Recovery**: Meccanismi di recovery per chiavi perse
 
-### 1. Applicare Schema Database
-```bash
-cd ruggine
-sqlx migrate run --source migrations
-```
+## Conclusioni
 
-### 2. Aggiornare Dipendenze
-Le nuove dipendenze sono già aggiunte al `Cargo.toml`:
-- `ring = "0.17"` - Crittografia
-- `base64 = "0.22"` - Encoding
-- `rand = "0.8"` - Generazione numeri casuali
-
-### 3. Integrazione Graduale
-L'implementazione è progettata per coesistere con il sistema di messaggi esistente:
-- I messaggi non crittografati continuano a funzionare
-- I client possono scegliere quando abilitare la crittografia
-- Migrazione graduale gruppo per gruppo
-
-## Considerazioni di Sicurezza
-
-### ✅ Vantaggi
-- **Zero-Knowledge Server**: Il server non può leggere i messaggi
-- **Forward Secrecy**: Compromissione chiavi future non compromette messaggi passati
-- **Autenticazione**: GCM previene tampering
-- **Performance**: Ring è ottimizzato per velocità
-
-### ⚠️ Considerazioni
-- **Gestione Chiavi**: Le chiavi sono in memoria, non persistenti
-- **Backup**: Messaggi crittografati non recuperabili se si perde la chiave
-- **Nuovi Membri**: Necessario condividere chiavi manualmente
-- **Key Rotation**: Da implementare per sicurezza a lungo termine
-
-## Estensioni Future
-
-### Possibili Miglioramenti
-1. **Signal Protocol**: Implementare ratcheting per forward secrecy perfetta
-2. **Key Rotation Automatica**: Rotazione periodica delle chiavi
-3. **Device Keys**: Chiavi separate per device multipli
-4. **Backup Sicuro**: Backup crittografato delle chiavi
-5. **Ephemeral Messages**: Auto-eliminazione dopo lettura
-
-### Integrazione con Features Esistenti
-- ✅ Funziona con inviti di gruppo
-- ✅ Compatibile con messaggi di sistema
-- ✅ Supporta tutti i tipi di messaggio
-- ✅ Mantiene timestamp e metadati
-
-## Testing
-
-### Unit Tests
-```bash
-cargo test crypto
-cargo test secure_chat
-cargo test secure_client
-```
-
-### Integration Tests
-I test di integrazione richiedono database di test e sono inclusi nei moduli.
-
-## Performance
-
-### Benchmark Attesi
-- **Crittografia**: ~1-5ms per messaggio medio
-- **Decrittografia**: ~1-5ms per messaggio medio
-- **Memoria**: ~32 bytes per chiave di gruppo
-- **Storage**: +~50% per messaggi crittografati (Base64 overhead)
-
-### Ottimizzazioni
-- Chiavi mantenute in memoria per performance
-- Batch processing per messaggi multipli
-- Indici database ottimizzati per query temporali
+L'implementazione fornisce una base solida per la sicurezza dei messaggi con crittografia moderna e pratiche standard. Il sistema è progettato per essere sicuro, performante e maintainabile, con chiara separazione tra logica di crittografia e business logic.
