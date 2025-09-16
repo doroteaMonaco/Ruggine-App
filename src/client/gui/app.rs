@@ -82,9 +82,10 @@ impl Application for ChatApp {
                 self.state.loading = true;
                 self.state.error_message = None;
                 use crate::client::gui::views::logger::{LogMessage, LogLevel};
+                self.state.logger.clear(); // Pulisci i messaggi precedenti
                 self.state.logger.push(LogMessage {
                     level: LogLevel::Info,
-                    message: format!("Connessione a {}...", host),
+                    message: if is_login { "Verifica credenziali..." } else { "Creazione account..." }.to_string(),
                 });
                 // Esegui la connessione e invia il comando
                 let svc_outer = self.chat_service.clone();
@@ -181,8 +182,13 @@ impl Application for ChatApp {
                         );
                     }
                 } else {
-                    // Login/registrazione fallita
-                    self.state.error_message = Some(message);
+                    // Login/registrazione fallita - usa il logger per mostrare l'errore
+                    use crate::client::gui::views::logger::{LogMessage, LogLevel};
+                    self.state.logger.clear(); // Pulisci i messaggi precedenti
+                    self.state.logger.push(LogMessage {
+                        level: LogLevel::Error,
+                        message: message.trim_start_matches("ERR:").trim().to_string(),
+                    });
                 }
                 
                 return Command::none();
