@@ -70,7 +70,6 @@ impl ChatService {
     /// Get the next WebSocket message if available
     pub async fn try_receive_websocket_message(&mut self) -> Option<WebSocketMessage> {
         if let Some(ref mut receiver) = self.websocket_receiver {
-            println!("[CHAT_SERVICE] Checking for WebSocket messages...");
             match receiver.try_recv() {
                 Ok(msg) => {
                     println!("[CHAT_SERVICE] Found WebSocket message: {:?}", msg);
@@ -137,12 +136,6 @@ impl ChatService {
                     CommandType::MultiLine(cmd) => (cmd, true),
                 };
 
-                // Log outgoing
-                if cmd.starts_with("/logout") {
-                    println!("[CLIENT:SVC] Sending logout command (redacted)");
-                } else {
-                    println!("[CLIENT:SVC] Sending command: {}", cmd);
-                }
 
                 // Attempt to send this command and receive a response.
                 // If the connection is dropped at any point, try to reconnect and

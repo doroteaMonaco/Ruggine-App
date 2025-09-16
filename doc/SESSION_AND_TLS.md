@@ -1,6 +1,10 @@
+
+
 # Session & TLS (flusso di sessione, presenza e TLS)
 
 Questo documento unificato descrive il comportamento delle sessioni, la gestione della presenza/concorrenza tra dispositivi, gli eventi d'audit persistiti e le note operative su TLS.
+
+
 
 ## Panoramica delle entità
 

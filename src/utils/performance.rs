@@ -19,6 +19,7 @@ pub async fn start_performance_logger(db: Arc<Database>, log_path: &str) {
             return;
         }
     };
+    
 
     // Write header if file is empty
     if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {

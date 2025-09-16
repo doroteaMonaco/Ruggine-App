@@ -794,13 +794,23 @@ impl ChatAppState {
                 self.loading = false;
                 self.logger.push(LogMessage {
                     level: LogLevel::Success,
-                    message: format!("Gruppo '{}' creato con successo!", group_name),
+                    message: format!("Group '{}' successfully created!", group_name),
                 });
                 
-                // Navigate to the newly created group
-                return Command::perform(
-                    async move { Message::OpenGroupChat(group_id, group_name) },
-                    |msg| msg);
+                // Navigate to the newly created group and auto-clear logger
+                return Command::batch([
+                    Command::perform(
+                        async move { Message::OpenGroupChat(group_id, group_name) },
+                        |msg| msg,
+                    ),
+                    Command::perform(
+                        async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            Message::ClearLog
+                        },
+                        |msg| msg,
+                    )
+                ]);
                 
             }
             Message::MyGroupsLoaded { groups } => {
@@ -824,7 +834,7 @@ impl ChatAppState {
                                     if response.starts_with("OK:") {
                                         Message::InviteToGroupResult { 
                                             success: true, 
-                                            message: format!("Invito inviato a {} con successo!", username_clone) 
+                                            message: format!("Invite successfully sent toa {}!", username_clone) 
                                         }
                                     } else {
                                         Message::InviteToGroupResult { 
@@ -835,7 +845,7 @@ impl ChatAppState {
                                 }
                                 Err(e) => Message::InviteToGroupResult { 
                                     success: false, 
-                                    message: format!("Errore nell'invio dell'invito: {}", e) 
+                                    message: format!("Error in message sending: {}", e) 
                                 },
                             }
                         },
@@ -909,7 +919,7 @@ impl ChatAppState {
                                     if response.starts_with("OK:") {
                                         Message::GroupInviteActionResult { 
                                             success: true, 
-                                            message: "Invito accettato! Ora fai parte del gruppo.".to_string() 
+                                            message: "Invite accepted!".to_string() 
                                         }
                                     } else {
                                         Message::GroupInviteActionResult { 
@@ -920,7 +930,7 @@ impl ChatAppState {
                                 }
                                 Err(e) => Message::GroupInviteActionResult { 
                                     success: false, 
-                                    message: format!("Errore nell'accettazione dell'invito: {}", e) 
+                                    message: format!("Error in accepting the invite: {}", e) 
                                 },
                             }
                         },
@@ -943,7 +953,7 @@ impl ChatAppState {
                                     if response.starts_with("OK:") {
                                         Message::GroupInviteActionResult { 
                                             success: true, 
-                                            message: "Invito rifiutato.".to_string() 
+                                            message: "Invito rejected.".to_string() 
                                         }
                                     } else {
                                         Message::GroupInviteActionResult { 
@@ -954,7 +964,7 @@ impl ChatAppState {
                                 }
                                 Err(e) => Message::GroupInviteActionResult { 
                                     success: false, 
-                                    message: format!("Errore nel rifiuto dell'invito: {}", e) 
+                                    message: format!("Error in rejecting the invite: {}", e) 
                                 },
                             }
                         },
@@ -1040,6 +1050,19 @@ impl ChatAppState {
                         let cfg = crate::server::config::ClientConfig::from_env();
                         let host = format!("{}:{}", cfg.default_host, cfg.default_port);
                         
+                        // Create a local message to add immediately to the UI
+                        let local_msg = ChatMessage {
+                            sender: self.username.clone(),
+                            content: message.clone(),
+                            timestamp: chrono::Utc::now().timestamp(),
+                            formatted_time: chrono::Utc::now().format("%H:%M").to_string(),
+                            sent_at: chrono::Utc::now().timestamp(),
+                        };
+                        
+                        // Add message to local cache immediately for instant UI feedback
+                        let messages = self.private_chats.entry(to.clone()).or_insert_with(Vec::new);
+                        messages.push(local_msg);
+                        
                         // Clear input immediately for better UX
                         // If we don't have the chat history cached yet, mark it as loading
                         if !self.private_chats.contains_key(&to) {
@@ -1053,7 +1076,7 @@ impl ChatAppState {
                                 async move {
                                     let mut guard = svc.lock().await;
                                     let _ = guard.send_private_message(&host, &token_clone, &to_clone, &message).await;
-                                    Message::TriggerImmediateRefresh { with: to_clone }
+                                    Message::NoOp  // WebSocket will handle server confirmation
                                 },
                                 |msg| msg,
                             ),
@@ -1076,6 +1099,19 @@ impl ChatAppState {
                         let cfg = crate::server::config::ClientConfig::from_env();
                         let host = format!("{}:{}", cfg.default_host, cfg.default_port);
                         
+                        // Create a local message to add immediately to the UI
+                        let local_msg = ChatMessage {
+                            sender: self.username.clone(),
+                            content: message.clone(),
+                            timestamp: chrono::Utc::now().timestamp(),
+                            formatted_time: chrono::Utc::now().format("%H:%M").to_string(),
+                            sent_at: chrono::Utc::now().timestamp(),
+                        };
+                        
+                        // Add message to local cache immediately for instant UI feedback
+                        let messages = self.group_chats.entry(group_id.clone()).or_insert_with(Vec::new);
+                        messages.push(local_msg);
+                        
                         // Clear input immediately for better UX
                         // If we don't have the chat history cached yet, mark it as loading
                         if !self.group_chats.contains_key(&group_id) {
@@ -1089,7 +1125,7 @@ impl ChatAppState {
                                 async move {
                                     let mut guard = svc.lock().await;
                                     let _ = guard.send_group_message(&host, &token_clone, &group_id_clone, &message).await;
-                                    Message::NoOp  // No immediate refresh needed - WebSocket will handle it
+                                    Message::NoOp  // WebSocket will handle server confirmation
                                 },
                                 |msg| msg,
                             ),
@@ -1219,47 +1255,65 @@ impl ChatAppState {
                     // Return to My Groups view
                     self.app_state = AppState::MyGroups;
                     
-                    // Reload groups list to reflect the change
+                    // Reload groups list to reflect the change and auto-clear logger
                     let svc = chat_service.clone();
                     let token = self.session_token.clone().unwrap_or_default();
                     let cfg = crate::server::config::ClientConfig::from_env();
                     let host = format!("{}:{}", cfg.default_host, cfg.default_port);
-                    return Command::perform(
-                        async move {
-                            let mut guard = svc.lock().await;
-                            let cmd = format!("/my_groups {}", token);
-                            match guard.send_command(&host, cmd).await {
-                                Ok(response) => {
-                                    // Parse response: "OK: My groups: id1:name1, id2:name2"
-                                    if response.starts_with("OK: My groups:") {
-                                        let after = response.splitn(3, ':').nth(2).unwrap_or("");
-                                        let groups: Vec<(String, String, usize)> = after
-                                            .split(',')
-                                            .map(|s| s.trim())
-                                            .filter(|s| !s.is_empty())
-                                            .map(|s| {
-                                                if let Some((id, name)) = s.split_once(':') {
-                                                    (id.to_string(), name.to_string(), 0) // member_count not used
-                                                } else {
-                                                    (s.to_string(), s.to_string(), 0)
-                                                }
-                                            })
-                                            .collect();
-                                        Message::MyGroupsLoaded { groups }
-                                    } else {
-                                        Message::MyGroupsLoaded { groups: vec![] }
-                                    }
-                                },
-                                Err(_) => Message::MyGroupsLoaded { groups: vec![] },
-                            }
-                        },
-                        |msg| msg
-                    );
+                    return Command::batch([
+                        Command::perform(
+                            async move {
+                                let mut guard = svc.lock().await;
+                                let cmd = format!("/my_groups {}", token);
+                                match guard.send_command(&host, cmd).await {
+                                    Ok(response) => {
+                                        // Parse response: "OK: My groups: id1:name1, id2:name2"
+                                        if response.starts_with("OK: My groups:") {
+                                            let after = response.splitn(3, ':').nth(2).unwrap_or("");
+                                            let groups: Vec<(String, String, usize)> = after
+                                                .split(',')
+                                                .map(|s| s.trim())
+                                                .filter(|s| !s.is_empty())
+                                                .map(|s| {
+                                                    if let Some((id, name)) = s.split_once(':') {
+                                                        (id.to_string(), name.to_string(), 0) // member_count not used
+                                                    } else {
+                                                        (s.to_string(), s.to_string(), 0)
+                                                    }
+                                                })
+                                                .collect();
+                                            Message::MyGroupsLoaded { groups }
+                                        } else {
+                                            Message::MyGroupsLoaded { groups: vec![] }
+                                        }
+                                    },
+                                    Err(_) => Message::MyGroupsLoaded { groups: vec![] },
+                                }
+                            },
+                            |msg| msg
+                        ),
+                        Command::perform(
+                            async move {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                Message::ClearLog
+                            },
+                            |msg| msg,
+                        )
+                    ]);
                 } else {
                     self.logger.push(LogMessage {
                         level: LogLevel::Error,
                         message: message.clone(),
                     });
+                    
+                    // Auto-clear error message after 2 seconds
+                    return Command::perform(
+                        async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            Message::ClearLog
+                        },
+                        |msg| msg,
+                    );
                 }
             }
             Message::NotAMember { group_id } => {
@@ -1333,21 +1387,24 @@ impl ChatAppState {
                                     if response.starts_with("OK:") {
                                         Message::DiscardMessagesResult { 
                                             success: true, 
-                                            message: "Messages discarded successfully".to_string(),
-                                            username: Some(with_clone)
+                                            message: response.trim_start_matches("OK:").trim().to_string(),
+                                            username: Some(with_clone),
+                                            group_id: None
                                         }
                                     } else {
                                         Message::DiscardMessagesResult { 
                                             success: false, 
                                             message: response,
-                                            username: Some(with_clone)
+                                            username: Some(with_clone),
+                                            group_id: None
                                         }
                                     }
                                 }
                                 Err(e) => Message::DiscardMessagesResult { 
                                     success: false, 
                                     message: format!("Error: {}", e),
-                                    username: Some(with_clone)
+                                    username: Some(with_clone),
+                                    group_id: None
                                 }
                             }
                         },
@@ -1371,21 +1428,24 @@ impl ChatAppState {
                                     if response.starts_with("OK:") {
                                         Message::DiscardMessagesResult { 
                                             success: true, 
-                                            message: "Group messages discarded successfully".to_string(),
-                                            username: None  // For group messages, username is None
+                                            message: response.trim_start_matches("OK:").trim().to_string(),
+                                            username: None,  // For group messages, username is None
+                                            group_id: Some(group_id_clone)
                                         }
                                     } else {
                                         Message::DiscardMessagesResult { 
                                             success: false, 
                                             message: response,
-                                            username: None
+                                            username: None,
+                                            group_id: Some(group_id_clone)
                                         }
                                     }
                                 }
                                 Err(e) => Message::DiscardMessagesResult { 
                                     success: false, 
                                     message: format!("Error: {}", e),
-                                    username: None
+                                    username: None,
+                                    group_id: Some(group_id_clone)
                                 }
                             }
                         },
@@ -1394,7 +1454,7 @@ impl ChatAppState {
                 }
                 return Command::none();
             }
-            Message::DiscardMessagesResult { success, message, username } => {
+            Message::DiscardMessagesResult { success, message, username, group_id } => {
                 use crate::client::gui::views::logger::{LogMessage, LogLevel};
                 if success {
                     self.logger.push(LogMessage {
@@ -1402,10 +1462,15 @@ impl ChatAppState {
                         message: message.clone(),
                     });
                     
-                    // Clear messages from local cache for the specific user
+                    // Clear messages from local cache 
                     if let Some(target_user) = username {
+                        // Private messages
                         println!("[DISCARD] Clearing local cache for user: {}", target_user);
                         self.private_chats.insert(target_user, Vec::new());
+                    } else if let Some(target_group_id) = group_id {
+                        // Group messages
+                        println!("[DISCARD] Clearing local cache for group: {}", target_group_id);
+                        self.group_chats.insert(target_group_id, Vec::new());
                     }
                 } else {
                     self.logger.push(LogMessage {
@@ -1413,7 +1478,15 @@ impl ChatAppState {
                         message: message.clone(),
                     });
                 }
-                return Command::none();
+                
+                // Auto-clear logger after 2 seconds (consistent with other operations)
+                return Command::perform(
+                    async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        Message::ClearLog
+                    },
+                    |msg| msg,
+                );
             }
             Message::NewMessagesReceived { with, messages } => {
                 self.loading_private_chats.remove(&with);
@@ -1510,18 +1583,28 @@ impl ChatAppState {
                             let messages = self.private_chats.entry(chat_key.clone())
                                 .or_insert_with(Vec::new);
                             
-                            // Check for duplicates before adding
+                            // Check for duplicates before adding (improved deduplication)
                             let is_duplicate = messages.iter().any(|existing_msg| {
                                 existing_msg.sender == app_msg.sender &&
                                 existing_msg.content == app_msg.content &&
-                                (existing_msg.timestamp - app_msg.timestamp).abs() < 2  // Within 2 seconds
+                                (existing_msg.timestamp - app_msg.timestamp).abs() < 5  // Within 5 seconds for better detection
                             });
                             
                             if !is_duplicate {
                                 messages.push(app_msg);
                                 println!("[APP] Added WebSocket private message to chat with {}", chat_key);
                             } else {
-                                println!("[APP] Skipped duplicate WebSocket private message for {}", chat_key);
+                                // Update the timestamp of the existing message to the server timestamp
+                                if let Some(existing_msg) = messages.iter_mut().find(|existing_msg| {
+                                    existing_msg.sender == app_msg.sender &&
+                                    existing_msg.content == app_msg.content &&
+                                    (existing_msg.timestamp - app_msg.timestamp).abs() < 5
+                                }) {
+                                    existing_msg.timestamp = app_msg.timestamp;
+                                    existing_msg.formatted_time = app_msg.formatted_time;
+                                    existing_msg.sent_at = app_msg.sent_at;
+                                }
+                                println!("[APP] Updated timestamp for duplicate WebSocket private message for {}", chat_key);
                             }
                         } else if chat_msg.chat_type == "group" {
                             // Extract just the group_id from "group_groupid" format
@@ -1529,18 +1612,28 @@ impl ChatAppState {
                             let messages = self.group_chats.entry(group_id.to_string())
                                 .or_insert_with(Vec::new);
                             
-                            // Check for duplicates before adding
+                            // Check for duplicates before adding (improved deduplication)
                             let is_duplicate = messages.iter().any(|existing_msg| {
                                 existing_msg.sender == app_msg.sender &&
                                 existing_msg.content == app_msg.content &&
-                                (existing_msg.timestamp - app_msg.timestamp).abs() < 2  // Within 2 seconds
+                                (existing_msg.timestamp - app_msg.timestamp).abs() < 5  // Within 5 seconds for better detection
                             });
                             
                             if !is_duplicate {
                                 messages.push(app_msg);
                                 println!("[APP] Added WebSocket group message to group {}", group_id);
                             } else {
-                                println!("[APP] Skipped duplicate WebSocket group message for group {}", group_id);
+                                // Update the timestamp of the existing message to the server timestamp
+                                if let Some(existing_msg) = messages.iter_mut().find(|existing_msg| {
+                                    existing_msg.sender == app_msg.sender &&
+                                    existing_msg.content == app_msg.content &&
+                                    (existing_msg.timestamp - app_msg.timestamp).abs() < 5
+                                }) {
+                                    existing_msg.timestamp = app_msg.timestamp;
+                                    existing_msg.formatted_time = app_msg.formatted_time;
+                                    existing_msg.sent_at = app_msg.sent_at;
+                                }
+                                println!("[APP] Updated timestamp for duplicate WebSocket group message for group {}", group_id);
                             }
                         }
                         

@@ -202,7 +202,7 @@ impl Application for ChatApp {
                 use crate::client::gui::views::logger::{LogMessage, LogLevel};
                 self.state.logger.push(LogMessage {
                     level: LogLevel::Success,
-                    message: format!("Login effettuato con successo come {}", self.state.username),
+                    message: format!("Successfully logged in as {}", self.state.username),
                 });
                 
                 // Pulisci il logger dopo un breve delay per mostrare il messaggio di successo
@@ -217,7 +217,6 @@ impl Application for ChatApp {
                 // Avvia il loop di controllo messaggi
                 let websocket_loop = Command::perform(
                     async move {
-                        println!("[APP] Starting WebSocket message loop...");
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         Msg::CheckWebSocketMessages
                     },
@@ -332,13 +331,11 @@ impl Application for ChatApp {
             }
             Msg::CheckWebSocketMessages => {
                 // Controlla se ci sono messaggi WebSocket in arrivo
-                println!("[APP] Checking for WebSocket messages...");
                 let svc = self.chat_service.clone();
                 return Command::perform(
                     async move {
                         let mut guard = svc.lock().await;
                         if let Some(ws_message) = guard.try_receive_websocket_message().await {
-                            println!("[APP] Found WebSocket message, forwarding to handler");
                             Msg::WebSocketMessageReceived(ws_message)
                         } else {
                             // Continua a controllare dopo un breve delay
