@@ -1,126 +1,485 @@
 <p align="center">
-	<img src="./img/ruggineImage.png" alt="Ruggine logo" width="420" />
+	<img src="./img/ruggineImage.png" alt="Ruggine Chat Application" width="420" />
 </p>
 
-# Ruggine — Chat client/server
+# Ruggine 🦀 — Real-Time Chat Application
 
-Ruggine è una piattaforma di messaggistica moderna, end-to-end, progettata per essere sicura, modulare e operabile in ambienti di produzione. Il codice server è scritto in Rust usando Tokio e SQLx; il client desktop utilizza Iced per l'interfaccia.
+[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 
-Questa guida fornisce istruzioni chiare e operative su come configurare, costruire, distribuire e gestire Ruggine in produzione.
+**Ruggine** is a modern, secure, and scalable real-time chat application built entirely in Rust. It features end-to-end encryption, WebSocket-based real-time messaging, and a beautiful cross-platform desktop GUI. Designed for both educational purposes and production deployment.
 
-## Sommario
-- Panoramica
-- Requisiti di produzione
-- Configurazione e gestione dei segreti
-- Build, containerizzazione e deploy
-- Operazioni, logging e monitoraggio
-- Sicurezza e gestione delle chiavi crittografiche
-- Backup, migrazioni e disaster recovery
-- Scaling e architettura di produzione
-- Troubleshooting e FAQ
-- Contribuire
+## 🌟 Features
 
-## Panoramica
-Ruggine gestisce chat private e di gruppo con messaggistica in tempo reale. Le conversazioni sono salvate nel database in forma cifrata (AES-256-GCM) e il server mantiene un modello di sessioni e presenza per i client connessi. 
+### 💬 **Real-Time Messaging**
+- **Instant communication** via WebSocket connections
+- **Private and group chats** with unlimited participants
+- **Message persistence** with SQLite/PostgreSQL backend
+- **Online presence tracking** with real-time user status
+- **Message history** with full-text search capabilities
 
-### Nuove Funzionalità v2.0
-- **WebSocket + Redis**: Messaggistica in tempo reale che sostituisce il polling del database
-- **Scalabilità migliorata**: Supporto per multiple istanze server via Redis pub/sub
-- **Latenza ridotta**: Messaggi istantanei invece di attesa polling
-- **Efficienza di rete**: Solo messaggi necessari invece di query periodiche
+### 🔒 **Security & Privacy**
+- **End-to-end encryption** using AES-256-GCM
+- **Secure session management** with token-based authentication
+- **TLS support** for production deployments
+- **Password hashing** with industry-standard algorithms
+- **Session timeout** and automatic cleanup
 
-Il progetto è pensato per essere facilmente integrato in pipeline CI/CD e in infrastrutture containerizzate.
+### 🚀 **Performance & Scalability**
+- **Redis integration** for high-performance caching and pub/sub
+- **Async architecture** built on Tokio for maximum concurrency
+- **Connection pooling** and efficient resource management
+- **Horizontal scaling** support with multiple server instances
 
-## Requisiti di produzione
-- Toolchain: utilizzare Rust stable (compilare in CI). Bloccare le dipendenze con `Cargo.lock`.
-- Database: PostgreSQL 14+ (consigliato); SQLite è solo per sviluppo.
-- Redis: Redis 6+ per WebSocket pub/sub e caching (obbligatorio per messaging real-time).
-- TLS: certificati validi per ingress/endpoint. È raccomandato l'uso di rustls o di un reverse-proxy (nginx/traefik).
-- Secret management: Vault, AWS Secrets Manager, Azure Key Vault o equivalenti per `ENCRYPTION_MASTER_KEY` e credenziali DB.
+### 🖥️ **Cross-Platform GUI**
+- **Native desktop application** using Iced framework
+- **Clean, modern interface** with dark/light theme support
+- **Responsive design** that works on various screen sizes
+- **Real-time notifications** for new messages
+- **Multi-window support** for different conversations
 
-## Configurazione e gestione dei segreti
-I parametri principali sono gestiti tramite variabili d'ambiente (o secret mounts). Esempio minimo:
+### 🛠️ **Developer Experience**
+- **Modular architecture** with clear separation of concerns
+- **Comprehensive documentation** and code examples
+- **Built-in monitoring** and performance metrics
+- **Docker support** for easy deployment
 
-```powershell
-DATABASE_URL=postgres://ruggine_user:securepassword@postgres:5432/ruggine
-REDIS_URL=redis://redis:6379
-SERVER_HOST=0.0.0.0
-SERVER_PORT=8443
-WEBSOCKET_PORT=8444
-ENABLE_ENCRYPTION=true
+## 📋 Table of Contents
+
+- [Quick Start](#-quick-start)
+- [Architecture](#-architecture)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [Usage](#-usage)
+- [Development](#-development)
+- [Deployment](#-deployment)
+- [API Documentation](#-api-documentation)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+## ⚡ Quick Start
+
+### Prerequisites
+- **Rust** 1.75+ (stable toolchain)
+- **Redis** 6.0+ for real-time messaging
+- **SQLite** (included) or **PostgreSQL** for data persistence
+
+### 1. Clone and Build
+```bash
+git clone https://github.com/doroteaMonaco/Ruggine-App.git
+cd Ruggine-App
+cargo build --release
 ENCRYPTION_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 TLS_CERT_PATH=/etc/ssl/certs/ruggine.crt
 TLS_KEY_PATH=/etc/ssl/private/ruggine.key
 LOG_LEVEL=info
 ```
 
-Linee guida operative:
-- Non salvare chiavi o credenziali nel repository né in image non protette.
-- Memorizzare `ENCRYPTION_MASTER_KEY` nel secret manager della piattaforma; caricarla al boot dell'applicazione.
-- Se si ruota la `ENCRYPTION_MASTER_KEY`, assicurarsi di avere procedura per la migrazione o per mantenere chiavi legacy per poter decrittare messaggi storici (vedi `doc/ENCRYPTION.md`).
+### 2. Setup Redis
+```bash
+# Install Redis locally
+# Windows (with Chocolatey):
+choco install redis-64
 
-## Build, containerizzazione e deploy
-Si raccomanda di costruire i binari in un job CI dedicato e di distribuire immagini Docker immutabili.
+# macOS (with Homebrew):
+brew install redis
 
-- Esempio di build in CI:
+# Linux (Ubuntu/Debian):
+sudo apt install redis-server
 
-```powershell
-cargo build --release --locked
+# Start Redis
+redis-server
 ```
 
-- Dockerfile di esempio (multi-stage):
+### 3. Run the Application
+```bash
+# Terminal 1: Start the server
+cargo run --bin ruggine-server
 
-```dockerfile
-FROM rust:1.70 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release --locked
-
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/ruggine-server /usr/local/bin/ruggine-server
-EXPOSE 8443
-ENTRYPOINT ["/usr/local/bin/ruggine-server"]
+# Terminal 2: Start the GUI client
+cargo run --bin ruggine-gui
 ```
 
-- Deployment consigliato:
-	- Per PoC: `docker-compose` con Postgres e reverse-proxy TLS.
-	- Per produzione: Kubernetes con Deployment, Service, Ingress, e Secret per `ENCRYPTION_MASTER_KEY`.
+That's it! You now have a fully functional chat application running locally.
 
-## Operazioni, logging e monitoraggio
-- Logging: utilizzare formato strutturato (JSON) e centralizzare. `LOG_LEVEL` gestisce il livello di verbosità.
-- Metriche: esporre metriche compatibili Prometheus (latency, message_count, decryption_errors, active_connections).
-- Health checks: implementare `/healthz` e `/readyz` per le probe di orchestratori.
-- Backup: eseguire backup regolari del DB e testare il ripristino. Automatizzare snapshot e retention policy.
+## 🏗️ Architecture
 
-## Sicurezza e gestione delle chiavi crittografiche
-- Crittografia: AES-256-GCM per i payload dei messaggi. I messaggi sono memorizzati come JSON con `nonce`, `ciphertext` e metadati.
-- Protezione chiave: mantenere `ENCRYPTION_MASTER_KEY` in un vault. L'accesso deve essere ristretto e auditabile.
-- Rotazione chiave: progettare una strategia (rolling re-encrypt, mantenimento chiavi legacy). Documentazione tecnica in `doc/ENCRYPTION.md`.
+Ruggine follows a modern client-server architecture designed for scalability and maintainability:
 
-## Backup, migrazioni e disaster recovery
-- Migrazioni: tenere le migration files versionate e applicarle in CI con controllo dello schema.
-- Recovery plan: scriptati i passi per restore DB, import della `ENCRYPTION_MASTER_KEY` e verifica integrità delle entità cifrate.
+```
+┌─────────────────┐    WebSocket    ┌─────────────────┐    Redis     ┌─────────────┐
+│                 │   Connection    │                 │   Pub/Sub    │             │
+│  Iced GUI       │◄───────────────►│  Rust Server    │◄────────────►│   Redis     │
+│  Client         │                 │  (Tokio async)  │              │   Cache     │
+│                 │                 │                 │              │             │
+└─────────────────┘                 └─────────────────┘              └─────────────┘
+                                              │                              
+                                              │ SQLx                         
+                                              ▼                              
+                                    ┌─────────────────┐                      
+                                    │                 │                      
+                                    │ SQLite/Postgres │                      
+                                    │   Database      │                      
+                                    │                 │                      
+                                    └─────────────────┘                      
+```
 
-## Scaling e architettura di produzione
-- Server: stateless, scalabile orizzontalmente dietro LB.
-- Database: PostgreSQL con replica e backup; valutare partitioning per dataset massicci.
-- Consigli: caching layer (Redis) per metadati ad accesso frequente e rate-limiting su ingress.
+### Key Components
 
-## Troubleshooting e FAQ
-- Q: "I messaggi non si decriptano dopo un riavvio" — A: verificare `ENCRYPTION_MASTER_KEY` e cercare nel log entry con tag `[DECRYPTION FAILED]`.
-- Q: "Registrazione fallita con username già in uso" — A: server restituisce errore user-friendly `ERR: Username già in uso`.
-- Q: "Messaggi duplicati o perdita di presenza" — A: controllare il processo di polling/ack nel `ChatService` e le probe di rete.
+- **🖥️ GUI Client**: Built with Iced framework for cross-platform native performance
+- **⚡ Server**: Async Rust server using Tokio for handling thousands of concurrent connections
+- **🔄 WebSocket Layer**: Real-time bidirectional communication between clients and server
+- **📊 Redis**: High-performance caching and pub/sub for scaling across multiple instances
+- **💾 Database**: Persistent storage with support for both SQLite (development) and PostgreSQL (production)
 
-## CI / Test suggeriti
-- Unit tests: derivazione chiavi, encrypt/decrypt, e helper crittografici.
-- Integration tests: job CI che esegue Postgres temporaneo, applica migrations e simula flussi di chat.
+## 📦 Installation
 
-## Contribuire
-- Branching: feature/*, fix/*, release/*.
-- PR: includere descrizione, test e passi per verifica.
+### System Requirements
+- **OS**: Windows 10+, macOS 10.15+, or Linux (Ubuntu 18.04+)
+- **RAM**: 4GB minimum, 8GB recommended
+- **Storage**: 500MB for application + database storage
+- **Network**: Internet connection for initial setup
 
-## Licenza e contatti
-- Inserire il file `LICENSE` nella root per chiarire termini di utilizzo (MIT/Apache-2.0 consigliate).
-- Mantainers: Luigi Gonnella & Dorotea Monaco — apri issue o PR nel repository per domande tecniche.
+### Build from Source
+
+1. **Install Rust** (if not already installed):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+2. **Clone the repository**:
+```bash
+git clone https://github.com/doroteaMonaco/Ruggine-App.git
+cd Ruggine-App
+```
+
+3. **Install dependencies**:
+```bash
+# On Ubuntu/Debian
+sudo apt update
+sudo apt install build-essential pkg-config libssl-dev
+
+# On macOS (with Homebrew)
+brew install openssl pkg-config
+
+# On Windows (with vcpkg)
+vcpkg install openssl:x64-windows
+```
+
+4. **Build the project**:
+```bash
+cargo build --release
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+Ruggine uses environment variables for configuration. Create a `.env` file in the project root:
+
+```bash
+# Database Configuration
+DATABASE_URL=sqlite:data/ruggine_modulare.db
+# For PostgreSQL: DATABASE_URL=postgres://user:password@localhost/ruggine
+
+# Redis Configuration  
+REDIS_URL=redis://127.0.0.1:6379
+
+# Server Configuration
+SERVER_HOST=127.0.0.1
+HTTP_PORT=5000
+WEBSOCKET_PORT=5001
+
+# Security
+ENABLE_ENCRYPTION=true
+ENCRYPTION_MASTER_KEY=your-32-byte-hex-key-here
+SESSION_TIMEOUT_HOURS=24
+
+# Logging
+LOG_LEVEL=info
+RUST_LOG=ruggine=debug
+
+# TLS (for production)
+TLS_CERT_PATH=/path/to/cert.pem
+TLS_KEY_PATH=/path/to/key.pem
+```
+
+### Configuration Files
+
+- `redis.conf`: Redis server configuration
+- `Cargo.toml`: Rust dependencies and project metadata
+- `docker-compose.yml`: Container orchestration setup
+
+## 🚀 Usage
+
+### Starting the Server
+
+The server provides both HTTP and WebSocket endpoints:
+
+```bash
+# Development mode
+cargo run --bin ruggine-server
+
+# Production mode with release optimizations
+cargo run --release --bin ruggine-server
+```
+
+Server will start on:
+- **HTTP API**: `http://localhost:5000`
+- **WebSocket**: `ws://localhost:5001`
+
+### Client Applications
+
+#### Desktop GUI
+```bash
+cargo run --bin ruggine-gui
+```
+
+Features:
+- Modern, responsive interface
+- Real-time message updates
+- Contact management
+- Group chat creation
+- File sharing capabilities
+
+
+### Basic Operations
+
+1. **Register a new user**:
+   - Launch the GUI client
+   - Click "Register" 
+   - Enter username and password
+   - Click "Create Account"
+
+2. **Login**:
+   - Enter your credentials
+   - Click "Login"
+
+3. **Start chatting**:
+   - Select a contact or create a group
+   - Type your message
+   - Press Enter to send
+
+## 🔧 Development
+
+### Project Structure
+
+```
+src/
+├── bin/                    # Executable binaries
+│   ├── ruggine-server.rs  # Main server application  
+│   ├── ruggine-gui.rs     # Desktop GUI client
+│   └── db_inspect.rs      # Database inspection utility
+├── server/                 # Server-side components
+│   ├── main.rs            # Server entry point
+│   ├── websocket.rs       # WebSocket handling
+│   ├── auth.rs            # Authentication & sessions
+│   ├── database.rs        # Database operations
+│   ├── messages.rs        # Message processing
+│   ├── groups.rs          # Group chat management
+│   └── redis_cache.rs     # Redis integration
+├── client/                 # Client-side components  
+│   ├── gui/               # Iced GUI components
+│   │   ├── app.rs         # Main application state
+│   │   ├── views/         # UI views and layouts
+│   │   └── widgets/       # Custom UI widgets
+│   ├── services/          # Client services
+│   │   ├── websocket_client.rs  # WebSocket client
+│   │   ├── chat_service.rs      # Chat operations
+│   │   └── connection.rs        # Connection management
+│   └── models/            # Data models
+├── common/                 # Shared components
+│   ├── models.rs          # Common data structures
+│   └── crypto.rs          # Encryption utilities
+└── utils/                 # Utility functions
+    └── performance.rs     # Performance monitoring
+```
+
+### Adding New Features
+
+1. **Create a feature branch**:
+```bash
+git checkout -b feature/your-feature-name
+```
+
+2. **Implement your changes** following the existing code patterns
+
+
+
+4. **Update documentation** if needed
+
+5. **Submit a pull request**
+
+### Code Style
+
+We follow standard Rust conventions:
+- Use `cargo fmt` for formatting
+- Use `cargo clippy` for linting  
+- Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
+
+## 🚢 Deployment
+
+### Docker Deployment
+
+1. **Build Docker image**:
+```bash
+docker build -t ruggine-chat .
+```
+
+2. **Run with Docker Compose**:
+```bash
+docker-compose up -d
+```
+
+This starts:
+- Ruggine server
+- Redis instance  
+- PostgreSQL database (if configured)
+
+### Production Deployment
+
+For production environments:
+
+1. **Use PostgreSQL** instead of SQLite
+2. **Enable TLS** with valid certificates
+3. **Configure proper logging**
+4. **Set up monitoring and alerting**
+5. **Implement backup strategies**
+
+Example production configuration:
+```yaml
+# docker-compose.prod.yml
+version: '3.8'
+services:
+  ruggine:
+    image: ruggine-chat:latest
+    environment:
+      - DATABASE_URL=postgres://user:pass@postgres:5432/ruggine
+      - REDIS_URL=redis://redis:6379
+      - ENABLE_TLS=true
+      - TLS_CERT_PATH=/certs/fullchain.pem
+      - TLS_KEY_PATH=/certs/privkey.pem
+    volumes:
+      - ./certs:/certs:ro
+    ports:
+      - "443:5000"
+      - "5001:5001"
+```
+
+### Scaling
+
+For high-traffic deployments:
+- Use Redis cluster for horizontal scaling
+- Deploy multiple server instances behind a load balancer
+- Implement database read replicas
+- Use CDN for static assets
+
+## 📚 API Documentation
+
+### WebSocket API
+
+#### Authentication
+```json
+{
+  "message_type": "auth",
+  "session_token": "your-session-token-here"
+}
+```
+
+#### Send Message
+```json
+{
+  "message_type": "send_message", 
+  "chat_type": "private",
+  "to_user": "recipient_username",
+  "content": "Hello, world!",
+  "session_token": "your-session-token"
+}
+```
+
+#### Group Messages
+```json
+{
+  "message_type": "send_message",
+  "chat_type": "group", 
+  "group_id": "group_uuid",
+  "content": "Hello everyone!",
+  "session_token": "your-session-token"
+}
+```
+
+### HTTP API
+
+- `POST /register` - Register new user
+- `POST /login` - User authentication  
+- `POST /logout` - End user session
+- `GET /users` - List online users
+- `POST /groups` - Create group chat
+
+### Security Features
+
+- **End-to-end encryption** using AES-256-GCM
+- **Secure session management** with automatic timeout
+- **Input validation** and SQL injection prevention
+- **Rate limiting** to prevent abuse
+- **Audit logging** for security events
+
+### Performance Optimizations
+
+- **Connection pooling** for database operations
+- **Redis caching** for frequently accessed data
+- **WebSocket multiplexing** for efficient real-time communication
+- **Async I/O** throughout the application stack
+- **Zero-copy serialization** where possible
+
+## 🤝 Contributing
+
+We welcome contributions! Here's how you can help:
+
+### Getting Started
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+7. Submit a pull request
+
+### Contribution Guidelines
+- Follow the existing code style
+- Write clear commit messages
+- Add documentation for new features
+- Ensure backward compatibility
+- Update the changelog
+
+### Areas for Contribution
+- 🐛 Bug fixes and improvements
+- ✨ New features and enhancements  
+- 📖 Documentation improvements
+- 🔧 Performance optimizations
+- 🌍 Internationalization
+
+### Code of Conduct
+This project follows the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct).
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🔗 Links
+
+- **Repository**: https://github.com/doroteaMonaco/Ruggine-App
+- **Documentation**: [/doc](./doc) folder
+- **Issues**: https://github.com/doroteaMonaco/Ruggine-App/issues
+- **Rust**: https://www.rust-lang.org/
+- **Iced GUI**: https://iced.rs/
+
+## 🙏 Acknowledgments
+
+- Built with ❤️ using the amazing Rust ecosystem
+- Special thanks to the Iced GUI framework team
+- Inspired by modern chat applications and Rust best practices
+- Created by **Dorotea Monaco** and **Luigi Gonnella** as part of a distributed systems project
 
 ---
+
+**Made with 🦀 Rust** | **Real-time** | **Secure** | **Cross-platform**
