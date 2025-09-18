@@ -115,4 +115,6 @@ pub enum Message {
     // Real-time WebSocket messages
     WebSocketMessageReceived(crate::client::services::websocket_client::WebSocketMessage),
     CheckWebSocketMessages,
+    // Logout completion
+    LogoutCompleted,
 }

@@ -335,13 +335,17 @@ impl Application for ChatApp {
                 return Command::perform(
                     async move {
                         let mut guard = svc.lock().await;
-                        if let Some(ws_message) = guard.try_receive_websocket_message().await {
-                            Msg::WebSocketMessageReceived(ws_message)
-                        } else {
-                            // Continua a controllare dopo un breve delay
-                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                            Msg::CheckWebSocketMessages
+                        
+                        // Only check for messages if WebSocket is connected
+                        if guard.is_websocket_connected().await {
+                            if let Some(ws_message) = guard.try_receive_websocket_message().await {
+                                return Msg::WebSocketMessageReceived(ws_message);
+                            }
                         }
+                        
+                        // Continue checking after a brief delay
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        Msg::CheckWebSocketMessages
                     },
                     |msg| msg,
                 );

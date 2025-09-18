@@ -49,9 +49,11 @@ pub struct ChatMessage {
     pub timestamp: i64,
     pub formatted_time: String,
     pub sent_at: i64,
+    /// True if this is a temporary local message awaiting server confirmation
+    pub is_pending: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ChatAppState {
     pub app_state: AppState,
     pub username: String,
@@ -69,7 +71,11 @@ pub struct ChatAppState {
     pub current_message_input: String,
     pub private_chats: HashMap<String, Vec<ChatMessage>>,
     pub loading_private_chats: std::collections::HashSet<String>,
+    /// Track the latest timestamp loaded via HTTP for each chat to avoid WebSocket duplicates
+    pub last_http_timestamp: HashMap<String, i64>,
     pub polling_active: bool,
+    /// Track if WebSocket message polling is active
+    pub websocket_polling_active: bool,
     pub group_chats: HashMap<String, Vec<ChatMessage>>,
     pub loading_group_chats: std::collections::HashSet<String>,
     pub group_polling_active: bool,
@@ -81,6 +87,43 @@ pub struct ChatAppState {
     pub loading_invites: bool,
     pub friends_list: Vec<String>,
     pub friend_requests: Vec<(String, String)>, // (username, message)
+}
+
+impl Default for ChatAppState {
+    fn default() -> Self {
+        Self {
+            app_state: AppState::default(),
+            username: String::new(),
+            password: String::new(),
+            selected_host: HostType::default(),
+            manual_host: String::new(),
+            is_login: false,
+            loading: false,
+            error_message: None,
+            session_token: None,
+            show_password: false,
+            logger: Vec::new(),
+            users_search_query: String::new(),
+            users_search_results: Vec::new(),
+            current_message_input: String::new(),
+            private_chats: HashMap::new(),
+            loading_private_chats: std::collections::HashSet::new(),
+            last_http_timestamp: HashMap::new(),
+            polling_active: false,
+            websocket_polling_active: false,
+            group_chats: HashMap::new(),
+            loading_group_chats: std::collections::HashSet::new(),
+            group_polling_active: false,
+            create_group_name: String::new(),
+            selected_participants: std::collections::HashSet::new(),
+            my_groups: Vec::new(),
+            loading_groups: false,
+            my_group_invites: Vec::new(),
+            loading_invites: false,
+            friends_list: Vec::new(),
+            friend_requests: Vec::new(),
+        }
+    }
 }
 
 impl ChatAppState {
@@ -241,6 +284,25 @@ impl ChatAppState {
                 // Clear session token from secure storage
                 let _ = session_store::clear_session_token();
                 
+                // Get session token and host for server logout
+                let session_token = self.session_token.clone().unwrap_or_default();
+                let host = "127.0.0.1:5000".to_string(); // TODO: get from config
+                
+                // Logout from server and reset ChatService
+                let svc = chat_service.clone();
+                return Command::perform(
+                    async move {
+                        let mut guard = svc.lock().await;
+                        match guard.logout(&host, &session_token).await {
+                            Ok(_) => println!("[APP] Server logout and ChatService reset completed"),
+                            Err(e) => println!("[APP] Logout error: {}, but continuing", e),
+                        }
+                        Message::LogoutCompleted
+                    },
+                    |msg| msg,
+                );
+            }
+            Message::LogoutCompleted => {
                 // Show logout message temporarily
                 self.logger.clear();
                 self.logger.push(LogMessage {
@@ -248,27 +310,23 @@ impl ChatAppState {
                     message: "Logout successful".to_string(),
                 });
                 
-                // Send logout command if we have a token
-                if let Some(token) = &self.session_token {
-                    let svc = chat_service.clone();
-                let cfg = crate::server::config::ClientConfig::from_env();
-                let _host = format!("{}:{}", cfg.default_host, cfg.default_port);
-                    let cfg = crate::server::config::ClientConfig::from_env();
-                    let host = format!("{}:{}", cfg.default_host, cfg.default_port);
-                    let token_clone = token.clone();
-                    
-                    // Send logout command asynchronously but don't wait for response
-                    tokio::spawn(async move {
-                        let mut guard = svc.lock().await;
-                        let _ = guard.send_command(&host, format!("/logout {}", token_clone)).await;
-                    });
-                }
-                
-                // Reset state
+                // Reset state including WebSocket polling
                 self.session_token = None;
                 self.username.clear();
                 self.password.clear();
+                self.websocket_polling_active = false;  // Stop WebSocket polling
                 self.app_state = AppState::Registration;
+                self.websocket_polling_active = false; // Stop WebSocket polling
+                
+                // Clear all cached private chats to force reload on next login
+                self.private_chats.clear();
+                self.loading_private_chats.clear();
+                println!("[APP] 🧹 Cleared all cached private chats and loading states");
+                
+                // Clear all cached group chats to force reload on next login
+                self.group_chats.clear();
+                self.loading_group_chats.clear();
+                println!("[APP] 🧹 Cleared all cached group chats and loading states");
                 
                 // Clear logger after a delay for temporary logout message
                 return Command::perform(
@@ -341,11 +399,12 @@ impl ChatAppState {
                 let svc = chat_service.clone();
                 let cfg = crate::server::config::ClientConfig::from_env();
                 let host = format!("{}:{}", cfg.default_host, cfg.default_port);
+                let token = self.session_token.clone().unwrap_or_default();
                 
                 return Command::perform(
                     async move {
                         let result = if kind == "Online" {
-                            UsersService::list_online(&svc, &host).await
+                            UsersService::list_online(&svc, &host, &token).await
                         } else {
                             UsersService::list_all(&svc, &host).await
                         };
@@ -1057,6 +1116,7 @@ impl ChatAppState {
                             timestamp: chrono::Utc::now().timestamp(),
                             formatted_time: chrono::Utc::now().format("%H:%M").to_string(),
                             sent_at: chrono::Utc::now().timestamp(),
+                            is_pending: true,  // This is a temporary local message
                         };
                         
                         // Add message to local cache immediately for instant UI feedback
@@ -1106,6 +1166,7 @@ impl ChatAppState {
                             timestamp: chrono::Utc::now().timestamp(),
                             formatted_time: chrono::Utc::now().format("%H:%M").to_string(),
                             sent_at: chrono::Utc::now().timestamp(),
+                            is_pending: true,  // This is a temporary local message
                         };
                         
                         // Add message to local cache immediately for instant UI feedback
@@ -1199,6 +1260,15 @@ impl ChatAppState {
                 }
             }
             Message::PrivateMessagesLoaded { with, messages } => {
+                // Track the latest timestamp from HTTP loaded messages
+                if let Some(latest_msg) = messages.iter().max_by_key(|msg| msg.timestamp) {
+                    self.last_http_timestamp.insert(with.clone(), latest_msg.timestamp);
+                    println!("[APP] 📚 HTTP loaded {} messages for {}, latest timestamp: {}", 
+                        messages.len(), with, latest_msg.timestamp);
+                } else {
+                    println!("[APP] 📚 HTTP loaded 0 messages for {}", with);
+                }
+                
                 self.private_chats.insert(with.clone(), messages);
                 self.loading_private_chats.remove(&with);
                 
@@ -1512,6 +1582,21 @@ impl ChatAppState {
                     level: LogLevel::Success,
                     message: "WebSocket connected - Real-time messaging enabled".to_string(),
                 });
+                
+                // Start WebSocket message polling only if not already active
+                if !self.websocket_polling_active {
+                    self.websocket_polling_active = true;
+                    println!("[APP] 🚀 Starting WebSocket message polling loop");
+                    return Command::perform(
+                        async move {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            Message::CheckWebSocketMessages
+                        },
+                        |msg| msg,
+                    );
+                } else {
+                    println!("[APP] 🔄 WebSocket polling already active, skipping restart");
+                }
                 return Command::none();
             }
             Message::WebSocketError { error } => {
@@ -1519,6 +1604,8 @@ impl ChatAppState {
                     level: LogLevel::Error,
                     message: format!("WebSocket error: {}", error),
                 });
+                // Stop polling on WebSocket error
+                self.websocket_polling_active = false;
                 return Command::none();
             }
             Message::StartMessagePolling { with } => {
@@ -1550,6 +1637,7 @@ impl ChatAppState {
                                 .map(|dt| dt.format("%H:%M").to_string())
                                 .unwrap_or_else(|| "??:??".to_string()),
                             sent_at: chat_msg.timestamp,
+                            is_pending: false,  // This is a confirmed server message
                         };
                         
                         // Determine the chat key (who we're chatting with)
@@ -1583,28 +1671,48 @@ impl ChatAppState {
                             let messages = self.private_chats.entry(chat_key.clone())
                                 .or_insert_with(Vec::new);
                             
-                            // Check for duplicates before adding (improved deduplication)
-                            let is_duplicate = messages.iter().any(|existing_msg| {
-                                existing_msg.sender == app_msg.sender &&
-                                existing_msg.content == app_msg.content &&
-                                (existing_msg.timestamp - app_msg.timestamp).abs() < 5  // Within 5 seconds for better detection
-                            });
+                            // Check if this WebSocket message is newer than the latest HTTP-loaded message
+                            let last_http_ts = self.last_http_timestamp.get(&chat_key).copied().unwrap_or(0);
                             
-                            if !is_duplicate {
-                                messages.push(app_msg);
-                                println!("[APP] Added WebSocket private message to chat with {}", chat_key);
+                            if app_msg.timestamp <= last_http_ts {
+                                println!("[APP] 🚫 Skipping WebSocket message (timestamp {} <= last HTTP timestamp {} for {})", 
+                                    app_msg.timestamp, last_http_ts, chat_key);
                             } else {
-                                // Update the timestamp of the existing message to the server timestamp
-                                if let Some(existing_msg) = messages.iter_mut().find(|existing_msg| {
-                                    existing_msg.sender == app_msg.sender &&
-                                    existing_msg.content == app_msg.content &&
-                                    (existing_msg.timestamp - app_msg.timestamp).abs() < 5
-                                }) {
-                                    existing_msg.timestamp = app_msg.timestamp;
-                                    existing_msg.formatted_time = app_msg.formatted_time;
-                                    existing_msg.sent_at = app_msg.sent_at;
+                                // Try to replace a pending message with same content from the same sender
+                                let mut replaced_pending = false;
+                                for existing_msg in messages.iter_mut() {
+                                    if existing_msg.is_pending && 
+                                       existing_msg.sender == app_msg.sender &&
+                                       existing_msg.content == app_msg.content {
+                                        // Replace the pending message with the server-confirmed one
+                                        *existing_msg = app_msg.clone();
+                                        existing_msg.is_pending = false;
+                                        replaced_pending = true;
+                                        println!("[APP] 🔄 Replaced pending message with server confirmation for {} (timestamp: {})", 
+                                            chat_key, app_msg.timestamp);
+                                        break;
+                                    }
                                 }
-                                println!("[APP] Updated timestamp for duplicate WebSocket private message for {}", chat_key);
+                                
+                                if !replaced_pending {
+                                    // Check for exact duplicates (same timestamp, sender, content - real network duplicates)
+                                    let is_exact_duplicate = messages.iter().any(|existing_msg| {
+                                        existing_msg.sender == app_msg.sender &&
+                                        existing_msg.content == app_msg.content &&
+                                        existing_msg.timestamp == app_msg.timestamp &&
+                                        !existing_msg.is_pending  // Only check confirmed messages for exact duplicates
+                                    });
+                                    
+                                    if !is_exact_duplicate {
+                                        let msg_timestamp = app_msg.timestamp; // Save timestamp before move
+                                        messages.push(app_msg);
+                                        println!("[APP] ✅ Added WebSocket private message to chat with {} (timestamp: {})", 
+                                            chat_key, msg_timestamp);
+                                    } else {
+                                        println!("[APP] ⚠️ Exact duplicate WebSocket message for {} (sender: {}, content: {}, timestamp: {})", 
+                                            chat_key, app_msg.sender, app_msg.content, app_msg.timestamp);
+                                    }
+                                }
                             }
                         } else if chat_msg.chat_type == "group" {
                             // Extract just the group_id from "group_groupid" format
@@ -1612,28 +1720,30 @@ impl ChatAppState {
                             let messages = self.group_chats.entry(group_id.to_string())
                                 .or_insert_with(Vec::new);
                             
-                            // Check for duplicates before adding (improved deduplication)
-                            let is_duplicate = messages.iter().any(|existing_msg| {
-                                existing_msg.sender == app_msg.sender &&
-                                existing_msg.content == app_msg.content &&
-                                (existing_msg.timestamp - app_msg.timestamp).abs() < 5  // Within 5 seconds for better detection
+                            // Check if there's a pending message to replace first
+                            let replaced_pending = messages.iter_mut().find(|msg| {
+                                msg.is_pending && msg.sender == app_msg.sender && msg.content == app_msg.content
                             });
                             
-                            if !is_duplicate {
-                                messages.push(app_msg);
-                                println!("[APP] Added WebSocket group message to group {}", group_id);
+                            if let Some(pending_msg) = replaced_pending {
+                                // Replace pending message with server confirmation
+                                *pending_msg = app_msg;
+                                println!("[APP] 🔄 Replaced pending group message with server confirmation for group {} (timestamp: {})", group_id, chat_msg.timestamp);
                             } else {
-                                // Update the timestamp of the existing message to the server timestamp
-                                if let Some(existing_msg) = messages.iter_mut().find(|existing_msg| {
+                                // Check only for exact timestamp duplicates (network-level duplicates)
+                                let is_exact_duplicate = messages.iter().any(|existing_msg| {
                                     existing_msg.sender == app_msg.sender &&
                                     existing_msg.content == app_msg.content &&
-                                    (existing_msg.timestamp - app_msg.timestamp).abs() < 5
-                                }) {
-                                    existing_msg.timestamp = app_msg.timestamp;
-                                    existing_msg.formatted_time = app_msg.formatted_time;
-                                    existing_msg.sent_at = app_msg.sent_at;
+                                    existing_msg.timestamp == app_msg.timestamp  // Only exact timestamp matches are duplicates
+                                });
+                                
+                                if !is_exact_duplicate {
+                                    messages.push(app_msg);
+                                    println!("[APP] ✅ Added WebSocket group message to group {} (timestamp: {})", group_id, chat_msg.timestamp);
+                                } else {
+                                    println!("[APP] ⚠️ Exact duplicate WebSocket group message for group {} (sender: {}, content: {}, timestamp: {})", 
+                                        group_id, chat_msg.from_user, chat_msg.content, chat_msg.timestamp);
                                 }
-                                println!("[APP] Updated timestamp for duplicate WebSocket group message for group {}", group_id);
                             }
                         }
                         
@@ -1676,6 +1786,42 @@ impl ChatAppState {
                     }
                 }
                 return Command::none();
+            }
+            Message::CheckWebSocketMessages => {
+                // Only continue if polling is still active
+                if !self.websocket_polling_active {
+                    println!("[APP] 🛑 WebSocket polling stopped, ending loop");
+                    return Command::none();
+                }
+                
+                // Check for new WebSocket messages
+                let svc = chat_service.clone();
+                
+                return Command::perform(
+                    async move {
+                        let mut guard = svc.lock().await;
+                        
+                        // Check if WebSocket is connected
+                        if guard.websocket_receiver.is_none() {
+                            // WebSocket not connected, wait and retry
+                            println!("[APP] 🔄 WebSocket receiver not available, retrying in 1 second...");
+                            drop(guard);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                            return Message::CheckWebSocketMessages;
+                        }
+                        
+                        if let Some(ws_message) = guard.try_receive_websocket_message().await {
+                            drop(guard);
+                            return Message::WebSocketMessageReceived(ws_message);
+                        }
+                        
+                        drop(guard);
+                        // Continue polling after a short delay
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        Message::CheckWebSocketMessages
+                    },
+                    |msg| msg,
+                );
             }
             // Placeholder implementations for other messages
             _ => {
